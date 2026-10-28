@@ -9,6 +9,9 @@ pip install pygame-ce        (plain `pygame` works too)
 python main.py
 ```
 
+Or just double-click `run_game.bat` (installs pygame-ce if missing, then starts the game).
+To build a standalone `dist\PERFORATED.exe` (no Python needed to play it), double-click `build_exe.bat`.
+
 Needs Python 3.9+ and a desktop with a display. Run it from this folder or anywhere (`python path/to/game/main.py`).
 
 ## Controls
