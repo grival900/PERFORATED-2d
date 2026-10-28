@@ -1,0 +1,18 @@
+PERFORATED, Level 1 (Pride): credits and licences
+
+SOUND EFFECTS (assets/sounds/*.wav)
+  Kenney (www.kenney.nl), CC0 1.0 (public domain). Taken from the sound set bundled with the
+  Python "arcade" library. See assets/sounds/KENNEY_License.txt.
+
+FONTS (assets/fonts/)
+  DejaVu Sans and DejaVu Sans Bold, free licence (Bitstream Vera licence plus public domain
+  changes). See assets/fonts/LICENSE_DejaVu.txt. Chosen because they include Cyrillic.
+
+TEXTURES AND SPRITES (assets/textures, assets/sprites)
+  Drawn by code for this project: tools/gen_assets.py (numpy + Pillow).
+
+MUSIC (assets/music/pride_loop.wav)
+  Synthesised for this project: tools/gen_music.py. No samples used.
+
+CODE
+  Python + pygame-ce, written for this project.

@@ -1,0 +1,3 @@
+# only needed to regenerate the art and music (not to play)
+numpy
+Pillow
