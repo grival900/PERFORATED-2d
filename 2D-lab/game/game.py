@@ -6,15 +6,16 @@ import pygame
 
 import settings as S
 import strings
+import weapons as W
 from assets import Assets
-from entities import Enemy, HeartPickup, Player, Shot, Spear
+from entities import Box, Enemy, Gem, HeartPickup, Player, Shot, Spear
 from fx import Particles
 from level import Level
-from strings import t
+from strings import t, tl
 from ui import UI
 
-AMBIENT = (62, 68, 98)
-UPGRADE_IDS = ["multi", "rate", "pierce", "power", "dash", "speed", "heart"]
+UPGRADE_IDS = ["multi", "rate", "pierce", "power", "area", "dash", "speed", "heart"]
+AREA_WEAPONS = ("halo", "pulse", "arc", "mine", "chakram")
 
 
 class Lighting:
@@ -22,11 +23,12 @@ class Lighting:
 
     def __init__(self, assets, w, h, scale=4):
         self.a, self.w, self.h, self.s = assets, w, h, scale
+        self.ambient = (62, 68, 98)
         self.lm = pygame.Surface((w // scale, h // scale))
 
     def render(self, screen, cam, lights):
         lm, s = self.lm, self.s
-        lm.fill(AMBIENT)
+        lm.fill(self.ambient)
         lw, lh = lm.get_size()
         for x, y, r, col in lights:
             sx, sy, rr = (x - cam[0]) / s, (y - cam[1]) / s, max(3, int(r / s / 3) * 3)
@@ -45,8 +47,13 @@ class Game:
         self.assets.load_images()
         self.assets.load_sounds()
         self.assets.prewarm()
-        self.level = Level(self.assets)
-        self.level.bake()
+        self.levels = {}                 # baked levels, built the first time they are played
+        self.level_no = 1
+        self.cfg = S.LEVELS[1]
+        self.theme = S.THEMES[1]
+        self.carry = None                # what the hero brings into this level
+        self.level_carry = None
+        self.level = self.get_level(1)
         self.fx = Particles(self.assets)
         self.ui = UI(self.assets)
         self.light = Lighting(self.assets, S.SCREEN_W, S.SCREEN_H)
@@ -56,15 +63,38 @@ class Game:
         self.cam = [0.0, 0.0]
         self.reset()
         self.state = "title"
-        self.cam = [S.ARENA / 2 - S.SCREEN_W / 2, S.ARENA / 2 - S.SCREEN_H / 2 + 100]
+        self.cam = [S.PLAYER_START[0] - S.SCREEN_W / 2, S.PLAYER_START[1] - S.SCREEN_H / 2 - 120]
 
     # ------------------------------------------------------------------ run control
+    def get_level(self, n):
+        if n not in self.levels:
+            lvl = Level(self.assets, n)
+            lvl.bake()
+            self.levels[n] = lvl
+        return self.levels[n]
+
+    def begin_level(self, n, carry=None):
+        """Start level n. `carry` is what the hero keeps from the levels before (None = a fresh hero)."""
+        self.level_no, self.cfg, self.theme = n, S.LEVELS[n], S.THEMES[n]
+        self.carry = self.level_carry = carry
+        if self.assets.theme is not self.theme:
+            self.assets.set_theme(self.theme)
+        self.level = self.get_level(n)
+        self.light.ambient = self.theme["ambient"]
+        self.reset()
+        self.assets.start_music()
+        self.show_banner(tl("subtitle", n) if n > 1 else t("stage").format(n=1) + ": " + tl("stage_desc", n)[1])
+
     def reset(self):
         random.seed()
         Enemy._next_id = 0
         self.level.gate_open = False
-        self.player = Player()
+        self.player = Player(self.carry)
+        names = self.carry["weapons"] if self.carry else ["needle"]
+        self.player.weapons = {w: W.WEAPONS[w]() for w in names}
         self.enemies, self.shots, self.spears = [], [], []
+        self.mines, self.chakrams, self.bolts, self.waves = [], [], [], []
+        self.grid = {}
         self.pickups = [HeartPickup(x, y) for x, y in S.HEART_SPOTS]
         self.fx.items.clear()
         self.time = 0.0
@@ -76,9 +106,22 @@ class Game:
         self.banner_t = 0.0
         self.banner_text = ""
         self.spawn_t = 2.2
+        self.recycle_t = 1.0
         self.elites = 0
-        self.upgrades_given = 0
-        self.pending_upgrades = 0
+        self.pending_elites = 0
+        self.elite_t = 0.0
+        # box points ("offerings") are separate from Pride points
+        self.boxes, self.gems = [], []
+        self.box_pts = 0               # progress towards the next stat upgrade
+        self.box_total = 0
+        self.box_upgrades = 0
+        self.box_timer = S.BOX_RESPAWN
+        self.box_pulse = 0.0
+        self.gem_acc = 0
+        self.gem_acc_t = 0.0
+        self.populate_boxes()
+        self.queue = []                # menus waiting to open: "weapon" / "stat"
+        self.choice_kind = "stat"
         self.upgrade_choices = []
         self.upgrade_sel = 0
         self.exit_open = False
@@ -86,15 +129,25 @@ class Game:
         self.dying_t = 0.0
         self.shake = 0.0
         self.red_flash = 0.0
-        self.enemy_speed_mult = 1.0
+        self.enemy_speed_mult = self.cfg.stage_speed[1] * self.cfg.speed_mult
         self.ghost_t = 0.0
         self.cam = [S.PLAYER_START[0] - S.SCREEN_W / 2, S.PLAYER_START[1] - S.SCREEN_H / 2]
         self.state = "play"
 
     def start(self):
-        self.reset()
-        self.assets.start_music()
-        self.show_banner(t("stage").format(n=1) + ": " + t("stage_desc")[1])
+        """A fresh run from Level 1."""
+        self.begin_level(1)
+
+    def restart_level(self):
+        """Retry the current level with the loadout the hero walked in with."""
+        self.begin_level(self.level_no, self.level_carry)
+
+    def next_level(self):
+        self.begin_level(self.level_no + 1, self.player.snapshot())
+
+    @property
+    def final_level(self):
+        return self.level_no >= S.NUM_LEVELS
 
     def show_banner(self, text):
         self.banner_text = text
@@ -113,6 +166,10 @@ class Game:
                 self.start()
             elif key == K.K_l:
                 strings.toggle()
+            elif key == K.K_F2:                      # jump to Level 2 with a sample loadout
+                self.begin_level(2, dict(S.DEMO_CARRY))
+            elif key == K.K_F3:                      # ... or to Level 3 with a late-game one
+                self.begin_level(3, dict(S.DEMO_CARRY_LATE))
             elif key == K.K_ESCAPE:
                 return "quit"
         elif st == "play":
@@ -126,21 +183,27 @@ class Game:
                 self.state = "play"
                 pygame.mixer.music.unpause() if self.assets.audio_ok else None
             elif key == K.K_r:
-                self.start()
+                self.restart_level()
             elif key == K.K_q:
                 return "quit"
         elif st == "upgrade":
+            n = max(1, len(self.upgrade_choices))
             if key in (K.K_1, K.K_2, K.K_3):
                 self.pick_upgrade(key - K.K_1)
             elif key in (K.K_LEFT, K.K_a):
-                self.upgrade_sel = (self.upgrade_sel - 1) % 3
+                self.upgrade_sel = (self.upgrade_sel - 1) % n
             elif key in (K.K_RIGHT, K.K_d):
-                self.upgrade_sel = (self.upgrade_sel + 1) % 3
+                self.upgrade_sel = (self.upgrade_sel + 1) % n
             elif key in (K.K_RETURN, K.K_KP_ENTER, K.K_SPACE):
                 self.pick_upgrade(self.upgrade_sel)
         elif st in ("over", "win"):
             if key in (K.K_RETURN, K.K_KP_ENTER):
-                self.start()
+                if st == "over":
+                    self.restart_level()
+                elif self.final_level:
+                    self.start()
+                else:
+                    self.next_level()
             elif key == K.K_ESCAPE:
                 return "quit"
         return None
@@ -148,7 +211,7 @@ class Game:
     def handle_mouse(self, pos, click):
         if self.state != "upgrade":
             return
-        for i, r in enumerate(self.ui.upgrade_rects()):
+        for i, r in enumerate(self.ui.upgrade_rects(len(self.upgrade_choices))):
             if r.collidepoint(pos):
                 self.upgrade_sel = i
                 if click:
@@ -185,6 +248,7 @@ class Game:
         self.time += dt
         self.banner_t = max(0.0, self.banner_t - dt)
         self.bar_pulse = max(0.0, self.bar_pulse - dt)
+        self.box_pulse = max(0.0, self.box_pulse - dt)
         self.shake = max(0.0, self.shake - dt * 2.4)
         self.pride_shown += (self.pride - self.pride_shown) * min(1.0, dt * 6)
 
@@ -196,16 +260,24 @@ class Game:
                 self.ghost_t = 0.03
                 self.fx.afterimage(p.x, p.y, self.assets.rotated("hero", p.facing))
             self.dash_hits()
-        self.auto_fire(target)
+        for w in list(p.weapons.values()):
+            w.update(self, dt)
+        W.update_waves(self, dt)
+        W.update_mines(self, dt)
+        W.update_chakrams(self, dt)
+        W.update_bolts(self, dt)
+        self.enemies = [e for e in self.enemies if e.hp > 0]
 
         self.update_director(dt)
         for e in self.enemies:
             e.update(dt, p, self.level, self)
+        self.grid = self.build_grid()
         self.separate_enemies(dt)
         self.update_shots(dt)
         self.update_spears(dt)
         self.contact_damage()
         self.update_pickups(dt)
+        self.update_boxes(dt)
         self.fx.update(dt)
         self.check_progress()
         self.update_camera(dt)
@@ -221,33 +293,29 @@ class Game:
     def nearest_enemy(self, x, y, max_d):
         best, bd = None, max_d * max_d
         for e in self.enemies:
-            if e.spawn_t > 0:
+            if e.spawn_t > 0 or e.hp <= 0:
                 continue
             d = (e.x - x) ** 2 + (e.y - y) ** 2
             if d < bd:
                 best, bd = e, d
         return best
 
+    def enemies_near(self, x, y, r):
+        """Live guardians whose body overlaps the circle (x, y, r), via the spatial grid."""
+        reach = r + 42
+        out = []
+        for gx in range(int((x - reach) // 80), int((x + reach) // 80) + 1):
+            for gy in range(int((y - reach) // 80), int((y + reach) // 80) + 1):
+                for e in self.grid.get((gx, gy), ()):
+                    if e.hp > 0 and (e.x - x) ** 2 + (e.y - y) ** 2 < (r + e.r) ** 2:
+                        out.append(e)
+        return out
+
     def try_dash(self, move):
         p = self.player
         if p.try_dash(*move):
             self.assets.play("dash")
             self.fx.ring(p.x, p.y, (90, 240, 225), 70, 0.25, 3)
-
-    def auto_fire(self, target):
-        p = self.player
-        if target is None or p.shot_cd > 0 or p.dashing:
-            return
-        dx, dy = target.x - p.x, target.y - p.y
-        d = math.hypot(dx, dy) or 1.0
-        base = math.atan2(dy, dx)
-        n = p.shots
-        for i in range(n):
-            a = base + math.radians((i - (n - 1) / 2) * S.SHOT_SPREAD_DEG)
-            ux, uy = math.cos(a), math.sin(a)
-            self.shots.append(Shot(p.x + ux * 26, p.y + uy * 26, ux * S.SHOT_SPEED, uy * S.SHOT_SPEED, p.damage, p.pierce))
-        p.shot_cd = p.cooldown
-        self.assets.play("shoot", 0.05)
 
     def build_grid(self):
         grid = {}
@@ -256,10 +324,12 @@ class Game:
         return grid
 
     def update_shots(self, dt):
-        grid = self.build_grid()
+        grid = self.grid
         keep = []
         for s in self.shots:
             s.life -= dt
+            if s.kind == "seeker":
+                W.steer_seeker(self, s, dt)
             s.x += s.vx * dt
             s.y += s.vy * dt
             dead = s.life <= 0
@@ -273,7 +343,7 @@ class Game:
                         for e in grid.get((gx, gy), ()):
                             if e.id in s.hit or e.hp <= 0 or e.spawn_t > 0.2:
                                 continue
-                            if (e.x - s.x) ** 2 + (e.y - s.y) ** 2 < (e.r + 9) ** 2:
+                            if (e.x - s.x) ** 2 + (e.y - s.y) ** 2 < (e.r + s.r) ** 2:
                                 s.hit.add(e.id)
                                 self.damage_enemy(e, s.dmg, s.vx, s.vy)
                                 s.pierce -= 1
@@ -289,22 +359,26 @@ class Game:
         self.shots = keep
         self.enemies = [e for e in self.enemies if e.hp > 0]
 
-    def damage_enemy(self, e, dmg, dx, dy):
-        e.hit(dmg, dx, dy)
+    def damage_enemy(self, e, dmg, dx, dy, force=220.0):
+        if e.hp <= 0:
+            return
+        e.hit(dmg, dx, dy, force)
         self.fx.burst(e.x, e.y, (230, 255, 252), 5, 200, 0.25, 6)
         self.assets.play("hit", 0.04)
         if e.hp <= 0:
             self.kill_enemy(e)
 
     def kill_enemy(self, e, award=True):
-        self.kills += 1 if award else 0
+        big = e.kind in ("elite", "bulwark")
         self.fx.diamonds(e.x, e.y, 14 if e.kind == "elite" else 7, 320)
-        self.fx.burst(e.x, e.y, (255, 240, 190), 12 if e.kind == "elite" else 7, 260, 0.5, 9)
-        self.fx.ring(e.x, e.y, (255, 236, 170), 70 if e.kind != "elite" else 150, 0.35, 3)
+        self.fx.burst(e.x, e.y, (255, 240, 190), 12 if big else 7, 260, 0.5, 9)
+        self.fx.ring(e.x, e.y, (255, 236, 170), 150 if e.kind == "elite" else 70, 0.35, 3)
         if award:
-            self.fx.text(e.x, e.y - 20, f"+{e.pts}", (255, 232, 150), 22 if e.kind != "elite" else 34)
+            self.kills += 1
             self.assets.play("kill", 0.04)
-            self.add_pride(e.pts)
+            if not self.exit_open:           # the bar is full: guardians stay, but are worth nothing
+                self.fx.text(e.x, e.y - 20, f"+{e.pts}", (255, 232, 150), 34 if e.kind == "elite" else 22)
+                self.add_pride(e.pts)
             if e.kind == "elite":
                 self.pickups.append(HeartPickup(e.x, e.y, respawns=False))
                 self.shake = max(self.shake, 0.6)
@@ -316,19 +390,50 @@ class Game:
         for e in self.enemies:
             if e.hp > 0 and e.id not in p.dash_hit and (e.x - p.x) ** 2 + (e.y - p.y) ** 2 < (e.r + 34) ** 2:
                 p.dash_hit.add(e.id)
-                self.damage_enemy(e, S.DASH_DAMAGE, p.dash_dx, p.dash_dy)
+                self.damage_enemy(e, S.DASH_DAMAGE * p.dmg_mult, p.dash_dx, p.dash_dy)
                 self.fx.ring(e.x, e.y, (90, 240, 225), 60, 0.2, 3)
         self.enemies = [e for e in self.enemies if e.hp > 0]
 
-    def spawn_spear(self, x, y, ux, uy):
-        self.spears.append(Spear(x, y, ux, uy))
-        self.assets.play("spear", 0.08)
+    def bomber_explode(self, e):
+        """A bomber's fuse ran out: blast radius BOMBER_BLAST, hurts the hero if still inside it."""
+        p = self.player
+        self.fx.burst(e.x, e.y, (255, 150, 60), 26, 460, 0.55, 12)
+        self.fx.burst(e.x, e.y, (255, 240, 170), 10, 300, 0.4, 9)
+        self.fx.ring(e.x, e.y, (255, 120, 60), S.BOMBER_BLAST, 0.35, 8)
+        self.assets.play("mine", 0.05)
+        self.shake = max(self.shake, 0.35)
+        if p.invuln <= 0 and math.hypot(p.x - e.x, p.y - e.y) < S.BOMBER_BLAST + p.r * 0.5:
+            self.hurt_player(p.x - e.x, p.y - e.y)
+        e.hp = 0
+
+    def spawn_spear(self, x, y, ux, uy, homing=False):
+        self.spears.append(Spear(x, y, ux, uy, homing))
+        self.assets.play("seeker" if homing else "spear", 0.08)
+
+    def charm_pull(self, e, dt):
+        """A charmer's spell: the hero is dragged towards her unless dashing."""
+        p = self.player
+        if p.dashing:
+            e.charm_t = 0.0
+            return
+        dx, dy = e.x - p.x, e.y - p.y
+        d = math.hypot(dx, dy)
+        if d > 80:
+            p.x += dx / d * S.CHARM_PULL * dt
+            p.y += dy / d * S.CHARM_PULL * dt
+            p.x, p.y, _ = self.level.collide(p.x, p.y, p.r)
 
     def update_spears(self, dt):
         p = self.player
         keep = []
         for sp in self.spears:
             sp.life -= dt
+            if sp.homing:                              # a cupid's heart bends towards the hero
+                want = math.atan2(p.y - sp.y, p.x - sp.x)
+                cur = math.atan2(sp.vy, sp.vx)
+                d = (want - cur + math.pi) % math.tau - math.pi
+                cur += max(-S.HEART_TURN * dt, min(S.HEART_TURN * dt, d))
+                sp.vx, sp.vy = math.cos(cur) * S.HEART_SPEED, math.sin(cur) * S.HEART_SPEED
             sp.x += sp.vx * dt
             sp.y += sp.vy * dt
             if sp.life <= 0 or self.level.shot_blocked(sp.x, sp.y):
@@ -368,9 +473,13 @@ class Game:
             self.enemies.clear()
             self.spears.clear()
             self.shots.clear()
+            self.mines.clear()
+            self.chakrams.clear()
+            self.bolts.clear()
+            self.waves.clear()
 
     def separate_enemies(self, dt):
-        grid = self.build_grid()
+        grid = self.grid
         p = self.player
         for e in self.enemies:
             cx, cy = int(e.x // 80), int(e.y // 80)
@@ -400,45 +509,71 @@ class Game:
                 e.x += dx / d * (rr - d)
                 e.y += dy / d * (rr - d)
 
-    # ---- progression -----------------------------------------------------------
+    # ---- progression: Pride bar -> waves -> weapons -------------------------------------
     def add_pride(self, pts):
         if self.exit_open:
             return
-        self.pride = min(S.PRIDE_MAX, self.pride + pts)
+        cfg = self.cfg
+        self.pride = min(cfg.pride_max, self.pride + pts)
         self.bar_pulse = 0.25
-        frac = self.pride / S.PRIDE_MAX
-        while self.upgrades_given < len(S.UPGRADE_AT) and frac >= S.UPGRADE_AT[self.upgrades_given]:
-            self.upgrades_given += 1
-            self.pending_upgrades += 1
-        new_stage = 1 + sum(1 for m in S.STAGE_AT if frac >= m)
-        if new_stage != self.stage:
-            self.stage = new_stage
-            self.enemy_speed_mult = (1.0, 1.0, 1.05, 1.1, 1.18)[self.stage]
-            self.show_banner(t("stage").format(n=self.stage) + ": " + t("stage_desc")[self.stage])
-        if self.pride >= S.PRIDE_MAX:
+        new_stage = 1 + sum(1 for m in cfg.stage_at_pts if self.pride >= m)
+        while self.stage < new_stage:
+            self.stage += 1
+            self.enemy_speed_mult = cfg.stage_speed[self.stage] * cfg.speed_mult
+            self.pending_elites += cfg.elites.get(self.stage, 0)
+            self.queue.append("weapon")               # every wave unlocks a weapon (a free upgrade once all are owned)
+            self.show_banner(t("stage").format(n=self.stage) + ": " + tl("stage_desc", self.level_no)[self.stage])
+        if self.pride >= cfg.pride_max:
             self.open_exit()
 
     def open_exit(self):
+        """The bar is full: the gate opens. The guardians that are out there stay."""
         self.exit_open = True
         self.level.gate_open = True
         self.assets.play("gate")
-        for e in list(self.enemies):
-            self.kill_enemy(e, award=False)
-        self.enemies.clear()
-        self.spears.clear()
         self.shake = max(self.shake, 0.7)
 
-    def check_progress(self):
-        if self.state == "play" and self.pending_upgrades > 0 and not self.exit_open:
-            self.open_upgrades()
+    def bar_frac(self, pts):
+        """Fill of the HUD bar: every wave gets an equal slice, whatever its point cost."""
+        edges, n = self.cfg.bar_edges, self.cfg.num_stages
+        for i in range(n):
+            if pts <= edges[i + 1]:
+                return (i + (pts - edges[i]) / (edges[i + 1] - edges[i])) / n
+        return 1.0
 
-    def open_upgrades(self):
+    # ---- progression: box points -> stat upgrades ----------------------------------------
+    def add_box_points(self, v):
+        self.box_pts += v
+        self.box_total += v
+        self.box_pulse = 0.25
+        while self.box_pts >= S.upgrade_cost(self.box_upgrades):
+            self.box_pts -= S.upgrade_cost(self.box_upgrades)
+            self.box_upgrades += 1
+            self.queue.append("stat")
+
+    def check_progress(self):
+        if self.state == "play" and self.queue:
+            self.open_menu(self.queue.pop(0))
+
+    def open_menu(self, kind):
         p = self.player
-        pool = [u for u in UPGRADE_IDS
-                if not (u == "multi" and p.shots >= S.SHOT_MAX_COUNT)
-                and not (u == "dash" and p.charge_cap >= S.DASH_CHARGES_CAP)
-                and not (u == "heart" and p.max_hp >= S.PLAYER_HP_CAP)]
-        self.upgrade_choices = random.sample(pool, 3)
+        if kind == "weapon":
+            pool = [w for w in W.UNLOCKABLE if w not in p.weapons]
+        else:
+            has_area = any(w in p.weapons for w in AREA_WEAPONS)
+            pool = [u for u in UPGRADE_IDS
+                    if not (u == "multi" and p.bonus >= S.STAT_BONUS_CAP)
+                    and not (u == "rate" and p.rate_mult <= S.STAT_RATE_FLOOR + 1e-6)
+                    and not (u == "pierce" and p.pierce_bonus >= S.STAT_PIERCE_CAP)
+                    and not (u == "area" and not has_area)
+                    and not (u == "dash" and p.charge_cap >= S.DASH_CHARGES_CAP)
+                    and not (u == "heart" and p.max_hp >= S.PLAYER_HP_CAP)]
+        if not pool and kind == "weapon":                 # every weapon owned: the wave gives a free upgrade instead
+            return self.open_menu("stat")
+        if not pool:
+            return
+        self.choice_kind = kind
+        self.upgrade_choices = random.sample(pool, min(3, len(pool)))
         self.upgrade_sel = 0
         self.state = "upgrade"
         self.assets.play("upgrade_open")
@@ -448,26 +583,32 @@ class Game:
             return
         uid = self.upgrade_choices[idx]
         p = self.player
-        if uid == "multi":
-            p.shots = min(S.SHOT_MAX_COUNT, p.shots + 1)
-        elif uid == "rate":
-            p.cooldown *= 0.82
-        elif uid == "pierce":
-            p.pierce += 1
-        elif uid == "power":
-            p.damage += 1
-        elif uid == "dash":
-            p.charge_cap = min(S.DASH_CHARGES_CAP, p.charge_cap + 1)
-            p.charges = min(p.charge_cap, p.charges + 1)
-            p.recharge *= 0.9
-        elif uid == "speed":
-            p.speed *= 1.10
-        elif uid == "heart":
-            p.max_hp = min(S.PLAYER_HP_CAP, p.max_hp + 1)
-            p.hp = min(p.max_hp, p.hp + 1)
-        self.pending_upgrades -= 1
+        if self.choice_kind == "weapon":
+            p.weapons[uid] = W.WEAPONS[uid]()
+            self.assets.play("weapon")
+            self.show_banner(t("weapon_new") + ": " + t("weapons")[uid][0])
+        else:
+            if uid == "multi":
+                p.bonus = min(S.STAT_BONUS_CAP, p.bonus + 1)
+            elif uid == "rate":
+                p.rate_mult = max(S.STAT_RATE_FLOOR, p.rate_mult * S.STAT_RATE_STEP)
+            elif uid == "pierce":
+                p.pierce_bonus = min(S.STAT_PIERCE_CAP, p.pierce_bonus + 1)
+            elif uid == "power":
+                p.dmg_mult += S.STAT_DAMAGE_STEP
+            elif uid == "area":
+                p.area += S.STAT_AREA_STEP
+            elif uid == "dash":
+                p.charge_cap = min(S.DASH_CHARGES_CAP, p.charge_cap + 1)
+                p.charges = min(p.charge_cap, p.charges + 1)
+                p.recharge *= 0.9
+            elif uid == "speed":
+                p.speed *= 1.10
+            elif uid == "heart":
+                p.max_hp = min(S.PLAYER_HP_CAP, p.max_hp + 1)
+                p.hp = min(p.max_hp, p.hp + 1)
+            self.assets.play("upgrade_pick")
         self.state = "play"
-        self.assets.play("upgrade_pick")
         self.fx.ring(p.x, p.y, (255, 232, 150), 160, 0.5, 4)
         self.fx.diamonds(p.x, p.y, 12, 260)
 
@@ -494,43 +635,203 @@ class Game:
             keep.append(h)
         self.pickups = keep
 
-    # ---- spawning ------------------------------------------------------------------
-    def pick_spawn_point(self):
+    # ---- boxes and gems -------------------------------------------------------------------
+    def box_spot(self, min_player_dist=0.0):
         p = self.player
+        for _ in range(40):
+            x, y = random.uniform(140, S.ARENA - 140), random.uniform(140, S.ARENA - 140)
+            if not self.level.is_free(x, y, 34):
+                continue
+            if min_player_dist and (x - p.x) ** 2 + (y - p.y) ** 2 < min_player_dist ** 2:
+                continue
+            if any((b.x - x) ** 2 + (b.y - y) ** 2 < 85 ** 2 for b in self.boxes):
+                continue
+            return x, y
+        return None
+
+    def add_box(self, x, y):
+        self.boxes.append(Box(x, y, random.random() < S.BOX_GILDED_CHANCE))
+
+    def populate_boxes(self):
+        sx, sy = S.PLAYER_START
+        for i in range(4):                      # a few right by the start so the idea is obvious
+            for _ in range(20):
+                a = -math.pi / 2 + (i - 1.5) * 0.7
+                d = random.uniform(230, 330)
+                x, y = sx + math.cos(a) * d, sy + math.sin(a) * d
+                if self.level.is_free(x, y, 34) and not any((b.x - x) ** 2 + (b.y - y) ** 2 < 85 ** 2 for b in self.boxes):
+                    self.boxes.append(Box(x, y, False))
+                    break
+        tries = 0
+        while len(self.boxes) < S.BOX_START and tries < 400:      # clusters of 3-6 across the map
+            tries += 1
+            c = self.box_spot()
+            if c is None:
+                continue
+            for _ in range(random.randint(3, 6)):
+                for _ in range(10):
+                    a, d = random.uniform(0, math.tau), random.uniform(60, 190)
+                    x, y = c[0] + math.cos(a) * d, c[1] + math.sin(a) * d
+                    if self.level.is_free(x, y, 34) and not any((b.x - x) ** 2 + (b.y - y) ** 2 < 85 ** 2 for b in self.boxes):
+                        self.add_box(x, y)
+                        break
+
+    def break_box(self, b):
+        vals = S.BOX_GILDED_GEMS if b.gilded else S.BOX_CRATE_GEMS
+        for v in vals:
+            self.gems.append(Gem(b.x, b.y, v))
+        col = (255, 220, 120) if b.gilded else (200, 192, 232)
+        self.fx.burst(b.x, b.y, col, 14, 300, 0.55, 9)
+        self.fx.burst(b.x, b.y, self.theme["gem"], 6, 220, 0.4, 7)
+        self.fx.ring(b.x, b.y, (200, 255, 240), 80, 0.3, 3)
+        self.fx.text(b.x, b.y - 24, f"+{sum(vals)}", self.theme["gem"], 20)
+        self.assets.play("box", 0.03)
+        self.shake = max(self.shake, 0.06)
+
+    def update_boxes(self, dt):
+        p = self.player
+        reach = Box.r + p.r
+        alive = []
+        for b in self.boxes:
+            if (b.x - p.x) ** 2 + (b.y - p.y) ** 2 < reach * reach:
+                self.break_box(b)
+            else:
+                alive.append(b)
+        self.boxes = alive
+        # restock, always out of view
+        self.box_timer -= dt
+        if self.box_timer <= 0:
+            self.box_timer = S.BOX_RESPAWN
+            if len(self.boxes) < S.BOX_TARGET:
+                spot = self.box_spot(S.BOX_RESPAWN_MIN_DIST)
+                if spot:
+                    self.add_box(*spot)
+        # gems: scatter, then fly to the hero
+        keep = []
+        for gm in self.gems:
+            gm.age += dt
+            gm.life -= dt
+            if gm.life <= 0:
+                continue
+            dx, dy = p.x - gm.x, p.y - gm.y
+            d = math.hypot(dx, dy) or 1.0
+            if gm.age > 0.3 and d < S.GEM_MAGNET:
+                spd = 420 + (1 - d / S.GEM_MAGNET) * (S.GEM_SPEED - 420)
+                k = min(1.0, 12 * dt)
+                gm.vx += (dx / d * spd - gm.vx) * k
+                gm.vy += (dy / d * spd - gm.vy) * k
+            else:
+                f = max(0.0, 1.0 - 5.0 * dt)
+                gm.vx *= f
+                gm.vy *= f
+            gm.x += gm.vx * dt
+            gm.y += gm.vy * dt
+            gm.x = min(S.ARENA - 20, max(20, gm.x))
+            gm.y = min(S.ARENA - 20, max(20, gm.y))
+            if d < p.r + 16 and gm.age > 0.15:
+                self.add_box_points(gm.val)
+                self.gem_acc += gm.val
+                self.gem_acc_t = 0.35
+                self.assets.play("gem", 0.05)
+                self.fx.burst(p.x, p.y, self.theme["gem"], 3, 140, 0.25, 4)
+                continue
+            keep.append(gm)
+        self.gems = keep[-400:]
+        if self.gem_acc:
+            self.gem_acc_t -= dt
+            if self.gem_acc_t <= 0:
+                self.fx.text(p.x, p.y - 38, f"+{self.gem_acc}", self.theme["gem"], 20)
+                self.gem_acc = 0
+
+    # ---- spawning ------------------------------------------------------------------
+    def spawn_center(self, ang=None):
+        """A point on a ring just outside the screen, in a free spot of the arena."""
+        p = self.player
+        for _ in range(14):
+            a = ang if ang is not None else random.uniform(0, math.tau)
+            d = random.uniform(*S.SPAWN_DIST)
+            x = min(S.ARENA - 40, max(40, p.x + math.cos(a) * d))
+            y = min(S.ARENA - 40, max(40, p.y + math.sin(a) * d))
+            if math.hypot(x - p.x, y - p.y) >= S.MIN_SPAWN_DISTANCE and self.level.is_free(x, y, 30):
+                return x, y
+            ang = None
         pts = [pt for pt in S.SPAWN_POINTS if math.hypot(pt[0] - p.x, pt[1] - p.y) > S.MIN_SPAWN_DISTANCE]
         return random.choice(pts or S.SPAWN_POINTS)
 
     def spawn_enemy(self, kind, x, y):
-        self.enemies.append(Enemy(kind, x, y))
+        scale = self.cfg.stage_hp[self.stage] * self.cfg.hp_mult
+        if kind == "elite":
+            scale = (1.0 + 0.15 * max(0, self.stage - 4)) * self.cfg.elite_hp_mult
+        x, y, _ = self.level.collide(x, y, S.ENEMIES[kind]["r"], through_gate=False)
+        self.enemies.append(Enemy(kind, x, y, scale))
+
+    def recycle_far(self):
+        """Guardians left far behind jump back to the edge of the action so the alive cap is not wasted."""
+        p = self.player
+        lim = S.RECYCLE_DISTANCE ** 2
+        for e in self.enemies:
+            if (e.x - p.x) ** 2 + (e.y - p.y) ** 2 > lim and e.charge_t <= 0:
+                e.x, e.y = self.spawn_center()
+                e.spawn_t = 0.35
 
     def update_director(self, dt):
-        if self.exit_open:
+        if self.exit_open and not S.SPAWN_AFTER_EXIT:
             return
-        st = S.STAGES[self.stage]
+        st = self.cfg.stages[self.stage]
+        self.recycle_t -= dt
+        if self.recycle_t <= 0:
+            self.recycle_t = 0.5
+            self.recycle_far()
+        if self.pending_elites > 0:                       # elites arrive one at a time when a wave begins
+            self.elite_t -= dt
+            if self.elite_t <= 0:
+                self.pending_elites -= 1
+                self.elite_t = 2.0
+                self.elites += 1
+                x, y = self.spawn_center()
+                self.spawn_enemy("elite", x, y)
+                self.assets.play("elite")
+                self.fx.ring(x, y, (255, 220, 120), 220, 0.8, 6)
         self.spawn_t -= dt
-        # elites: one when stage 4 begins, a second near the end
-        if self.stage == 4 and self.elites == 0 or (self.pride >= 0.9 * S.PRIDE_MAX and self.elites == 1):
-            self.elites += 1
-            x, y = self.pick_spawn_point()
-            self.spawn_enemy("elite", x, y)
-            self.assets.play("elite")
-            self.fx.ring(x, y, (255, 220, 120), 220, 0.8, 6)
         if self.spawn_t > 0:
             return
         self.spawn_t = st["interval"] * random.uniform(0.85, 1.15)
-        alive = len(self.enemies)
-        room = min(st["cap"], S.MAX_ENEMIES) - alive
+        room = min(st["cap"], S.MAX_ENEMIES) - len(self.enemies)
         if room <= 0:
             return
-        n = min(room, random.randint(*st["group"]))
-        px, py = self.pick_spawn_point()
-        kinds, weights = zip(*st["weights"].items())
-        for _ in range(n):
-            kind = random.choices(kinds, weights)[0]
+        if random.random() < st["swarm"]:                  # a pack of fast swarmers
+            n = min(room, random.randint(*self.cfg.swarm_pack))
+            kinds = ["swarmer"] * n
+            spread = 95
+        else:
+            n = min(room, random.randint(*st["group"]))
+            ks, ws = zip(*st["weights"].items())
+            kinds = random.choices(ks, ws, k=n)
+            lancers = sum(1 for e in self.enemies if e.kind in S.RANGED_KINDS)
+            charmers = sum(1 for e in self.enemies if e.kind == "charmer")
+            for i, k in enumerate(kinds):                  # never a storm of spears: extras become sentinels
+                if k in S.RANGED_KINDS:
+                    if lancers >= self.cfg.lancer_cap:
+                        kinds[i] = "sentinel"
+                    else:
+                        lancers += 1
+                elif k == "charmer":
+                    if charmers >= S.CHARMER_CAP:
+                        kinds[i] = "skirmisher"
+                    else:
+                        charmers += 1
+            spread = 70
+        centers = [self.spawn_center()]
+        if st["pincer"] and n >= 4:                         # half the group comes from the opposite side
+            p = self.player
+            a = math.atan2(centers[0][1] - p.y, centers[0][0] - p.x) + math.pi + random.uniform(-0.5, 0.5)
+            centers.append(self.spawn_center(a))
+        for i, kind in enumerate(kinds):
+            cx, cy = centers[i % len(centers)]
             ang = random.uniform(0, math.tau)
-            rad = random.uniform(0, 70)
-            self.spawn_enemy(kind, min(S.ARENA - 30, max(30, px + math.cos(ang) * rad)),
-                             min(S.ARENA - 30, max(30, py + math.sin(ang) * rad)))
+            rad = random.uniform(0, spread)
+            self.spawn_enemy(kind, min(S.ARENA - 30, max(30, cx + math.cos(ang) * rad)),
+                             min(S.ARENA - 30, max(30, cy + math.sin(ang) * rad)))
 
     def update_camera(self, dt):
         p = self.player
@@ -559,10 +860,13 @@ class Game:
             return (self.cam[0] + random.uniform(-a, a), self.cam[1] + random.uniform(-a, a))
         return (self.cam[0], self.cam[1])
 
+    def on_screen(self, x, y, pad, cam):
+        return -pad < x - cam[0] < S.SCREEN_W + pad and -pad < y - cam[1] < S.SCREEN_H + pad
+
     def draw(self, screen):
         a = self.assets
         cam = self.view_cam()
-        W, H = S.SCREEN_W, S.SCREEN_H
+        W_, H = S.SCREEN_W, S.SCREEN_H
         t_now = self.clock
         lvl = self.level
         lvl.draw_floor(screen, cam)
@@ -576,6 +880,34 @@ class Game:
                 screen.blit(self.shadow(40), self.shadow(40).get_rect(center=(sx, sy + 16)))
                 screen.blit(img, img.get_rect(center=(sx, sy)))
 
+        # boxes, mines and gems lie on the floor, under the characters
+        for b in self.boxes:
+            if self.on_screen(b.x, b.y, 60, cam):
+                img = a.img["box_gilded" if b.gilded else "box_crate"]
+                sx, sy = b.x - cam[0], b.y - cam[1]
+                screen.blit(self.shadow(54), self.shadow(54).get_rect(center=(sx, sy + 18)))
+                screen.blit(img, img.get_rect(center=(sx, sy)))
+                if b.gilded:
+                    g = a.glow(34 + 5 * math.sin(t_now * 4 + b.t), (60, 46, 14))
+                    screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
+        for m in self.mines:
+            if self.on_screen(m.x, m.y, 60, cam):
+                sx, sy = m.x - cam[0], m.y - cam[1]
+                screen.blit(a.img["mine"], a.img["mine"].get_rect(center=(sx, sy)))
+                armed = m.age > 0.6
+                pulse = 0.5 + 0.5 * math.sin(t_now * (9 if armed else 20))
+                g = a.glow(20 + 6 * pulse, (150, 90, 20) if armed else (80, 80, 80))
+                screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
+        for gm in self.gems:
+            if self.on_screen(gm.x, gm.y, 40, cam):
+                sx, sy = gm.x - cam[0], gm.y - cam[1] + math.sin(t_now * 5 + gm.t) * 3
+                img = a.img["gem"]
+                if gm.life < 5 and int(t_now * 10) % 2 == 0:
+                    continue
+                screen.blit(img, img.get_rect(center=(sx, sy)))
+                g = a.glow(18, (20, 90, 80))
+                screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
+
         p = self.player
         # ferryman at the altar
         fx_, fy_ = S.ALTAR_POS[0] - 70, S.ALTAR_POS[1] + 12
@@ -588,21 +920,39 @@ class Game:
         for _, kind, obj in drawables:
             if kind == "ferry":
                 sx, sy = fx_ - cam[0], fy_ - cam[1]
-                ang = math.atan2(p.x - fx_, -(p.y - fy_))
-                img = a.rotated("ferryman", ang * 0.4)
-                screen.blit(self.shadow(56), self.shadow(56).get_rect(center=(sx, sy + 20)))
-                screen.blit(img, img.get_rect(center=(sx, sy + math.sin(t_now * 1.6) * 2)))
+                if -100 < sx < W_ + 100 and -100 < sy < H + 100:
+                    ang = math.atan2(p.x - fx_, -(p.y - fy_))
+                    img = a.rotated("ferryman", ang * 0.4)
+                    screen.blit(self.shadow(56), self.shadow(56).get_rect(center=(sx, sy + 20)))
+                    screen.blit(img, img.get_rect(center=(sx, sy + math.sin(t_now * 1.6) * 2)))
             elif kind == "enemy":
                 self.draw_enemy(screen, cam, obj, t_now)
             else:
                 self.draw_player(screen, cam, obj, t_now)
 
-        # projectiles
+        # weapons' own visuals, then projectiles
+        if self.state not in ("over", "dying"):
+            for w in p.weapons.values():
+                w.draw(self, screen, cam, t_now)
+        for c in self.chakrams:
+            img = a.rotated("chakram", c.spin)
+            screen.blit(img, img.get_rect(center=(c.x - cam[0], c.y - cam[1])))
         for s in self.shots:
-            img = a.heading("needle", s.vx, s.vy)
-            screen.blit(img, img.get_rect(center=(s.x - cam[0], s.y - cam[1])))
+            sx, sy = s.x - cam[0], s.y - cam[1]
+            if s.kind == "seeker":
+                img = a.img["seeker"]
+            elif s.kind == "pellet":
+                img = a.heading("pellet", s.vx, s.vy)
+            else:
+                img = a.heading("needle", s.vx, s.vy)
+            screen.blit(img, img.get_rect(center=(sx, sy)))
         for sp in self.spears:
-            img = a.heading("spear", sp.vx, sp.vy)
+            if sp.homing:
+                img = a.img["love_bolt"]
+                k = 1.0 + 0.12 * math.sin(t_now * 12 + sp.x)
+                img = pygame.transform.rotozoom(img, 0, k)
+            else:
+                img = a.heading("spear", sp.vx, sp.vy)
             screen.blit(img, img.get_rect(center=(sp.x - cam[0], sp.y - cam[1])))
         self.draw_telegraphs(screen, cam)
         self.fx.draw(screen, cam)
@@ -611,12 +961,26 @@ class Game:
         lights = list(lvl.static_lights(t_now))
         lights.append((p.x, p.y, 430, (235, 230, 250)))
         for s in self.shots:
-            lights.append((s.x, s.y, 100, (60, 220, 205)))
+            col = {"seeker": (150, 90, 220), "pellet": (170, 140, 70)}.get(s.kind, (60, 220, 205))
+            lights.append((s.x, s.y, 100, col))
         for sp in self.spears:
-            lights.append((sp.x, sp.y, 130, (255, 226, 140)))
+            lights.append((sp.x, sp.y, 130, (255, 110, 170) if sp.homing else (255, 226, 140)))
+        for c in self.chakrams:
+            lights.append((c.x, c.y, 120, (170, 180, 230)))
+        for w in p.weapons.values():
+            lights += w.lights(self)
+        n = 0
+        for gm in self.gems:
+            if self.on_screen(gm.x, gm.y, 100, cam):
+                lights.append((gm.x, gm.y, 70, (40, 170, 150)))
+                n += 1
+                if n > 14:
+                    break
+        for m in self.mines:
+            lights.append((m.x, m.y, 90, (180, 100, 30)))
         n = 0
         for e in self.enemies:
-            if -200 < e.x - cam[0] < W + 200 and -200 < e.y - cam[1] < H + 200:
+            if -200 < e.x - cam[0] < W_ + 200 and -200 < e.y - cam[1] < H + 200:
                 lights.append((e.x, e.y, 84 if e.kind != "elite" else 190, (150, 140, 110)))
                 n += 1
                 if n > 45:
@@ -624,9 +988,11 @@ class Game:
         lights.append((S.ALTAR_POS[0] - 70, S.ALTAR_POS[1] - 20, 120, (60, 235, 215)))
         self.light.render(screen, cam, lights)
         lvl.draw_flames(screen, cam, t_now)
+        W.draw_bolts(self, screen, cam)
         # additive bloom on top of the lit scene
         for s in self.shots:
-            g = a.glow(30, (50, 200, 190))
+            col = {"seeker": (150, 90, 220), "pellet": (150, 120, 50)}.get(s.kind, (50, 200, 190))
+            g = a.glow(30, col)
             screen.blit(g, g.get_rect(center=(s.x - cam[0], s.y - cam[1])), special_flags=pygame.BLEND_RGB_ADD)
         if lvl.gate_open:
             g = a.glow(220, (110, 90, 40))
@@ -634,7 +1000,7 @@ class Game:
                         special_flags=pygame.BLEND_RGB_ADD)
         # vignette
         vg = a.img["vignette"]
-        screen.blit(pygame.transform.smoothscale(vg, (W, H)), (0, 0))
+        screen.blit(pygame.transform.smoothscale(vg, (W_, H)), (0, 0))
 
         if self.state == "title":
             self.ui.draw_title(screen, self)
@@ -656,25 +1022,30 @@ class Game:
             return
         screen.blit(self.shadow(e.shadow), self.shadow(e.shadow).get_rect(center=(sx, sy + e.r * 0.55)))
         img = a.rotated(e.sprite, e.face)
-        if e.flash > 0:
+        enraged = e.kind == "bulwark" and e.hp < e.max_hp * S.BULWARK_ENRAGE
+        fused = e.kind == "bomber" and e.windup > 0 and int(e.t * 16) % 2 == 0
+        if e.flash > 0 or enraged or fused or (e.kind == "skirmisher" and e.charge_t > 0):
             img = img.copy()
-            img.fill((130, 130, 130), special_flags=pygame.BLEND_RGB_ADD)
+            if e.flash > 0:
+                img.fill((130, 130, 130), special_flags=pygame.BLEND_RGB_ADD)
+            else:
+                img.fill((90, 10, 10), special_flags=pygame.BLEND_RGB_ADD)
         if e.spawn_t > 0:
             k = 1 - e.spawn_t / 0.35
             img = pygame.transform.rotozoom(img, 0, 0.6 + 0.4 * k)
             img.set_alpha(int(255 * k))
         bob = math.sin(e.t * 3) * 2
         screen.blit(img, img.get_rect(center=(sx, sy + bob)))
-        n = {"sentinel": 3, "skirmisher": 0, "lancer": 2, "elite": 5}[e.kind]
+        n = {"sentinel": 3, "skirmisher": 0, "lancer": 2, "elite": 5, "swarmer": 0, "bulwark": 4, "bomber": 0, "banker": 2, "charmer": 3, "cupid": 0}[e.kind]
         rad = e.r + 18 + (6 if e.kind == "elite" else 0)
         shard = a.img["shard"]
         for i in range(n):
             ang = e.t * 1.6 + i * math.tau / n
             screen.blit(shard, shard.get_rect(center=(sx + math.cos(ang) * rad, sy + math.sin(ang) * rad * 0.9 + bob)))
-        if e.kind == "elite" and e.hp < e.max_hp:
-            w = 70
+        if e.kind in ("elite", "bulwark") and e.hp < e.max_hp:
+            w = 70 if e.kind == "elite" else 54
             pygame.draw.rect(screen, (20, 18, 34), (sx - w / 2, sy - e.r - 34, w, 7))
-            pygame.draw.rect(screen, (244, 204, 96), (sx - w / 2, sy - e.r - 34, w * e.hp / e.max_hp, 7))
+            pygame.draw.rect(screen, (244, 204, 96), (sx - w / 2, sy - e.r - 34, w * max(0.0, e.hp) / e.max_hp, 7))
 
     def draw_player(self, screen, cam, p, t_now):
         a = self.assets
@@ -689,13 +1060,46 @@ class Game:
         screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
 
     def draw_telegraphs(self, screen, cam):
+        p = self.player
+        for e in self.enemies:
+            if e.kind == "charmer" and e.charm_t > 0:          # the spell: a pink thread from her to you
+                a = self.assets
+                x0, y0, x1, y1 = e.x - cam[0], e.y - cam[1], p.x - cam[0], p.y - cam[1]
+                pygame.draw.line(screen, (255, 90, 170), (x0, y0), (x1, y1), 4)
+                pygame.draw.line(screen, (255, 200, 225), (x0, y0), (x1, y1), 1)
+                g = a.glow(46, (150, 30, 90))
+                screen.blit(g, g.get_rect(center=(x1, y1)), special_flags=pygame.BLEND_RGB_ADD)
         for e in self.enemies:
             if e.windup <= 0:
                 continue
             sx, sy = e.x - cam[0], e.y - cam[1]
             if e.kind == "lancer":
                 k = 1 - e.windup / S.SPEAR_WINDUP
-                pygame.draw.line(screen, (255, int(200 + 40 * k), 120), (sx, sy), (sx + e.cdx * 520, sy + e.cdy * 520), 2)
+                n = 3 if self.stage >= self.cfg.fan_stage else 1
+                for i in range(n):
+                    a = (i - (n - 1) / 2) * 0.27
+                    c, s = math.cos(a), math.sin(a)
+                    dx, dy = e.cdx * c - e.cdy * s, e.cdx * s + e.cdy * c
+                    pygame.draw.line(screen, (255, int(200 + 40 * k), 120), (sx, sy), (sx + dx * 520, sy + dy * 520), 2)
+            elif e.kind == "bomber":
+                k = 1 - e.windup / S.BOMBER_FUSE
+                r = int(S.BOMBER_BLAST)
+                tmp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+                pygame.draw.circle(tmp, (255, 60, 40, int(40 + 90 * k)), (r, r), r)
+                pygame.draw.circle(tmp, (255, 170, 90, 220), (r, r), r, 4)
+                pygame.draw.circle(tmp, (255, 90, 50, int(60 + 120 * k)), (r, r), max(2, int(r * k)))
+                screen.blit(tmp, (sx - r, sy - r))
+            elif e.kind == "banker":
+                pygame.draw.line(screen, (255, 230, 120), (sx, sy), (sx + e.cdx * 560, sy + e.cdy * 560), 2)
+            elif e.kind == "cupid":
+                pygame.draw.line(screen, (255, 140, 190), (sx, sy), (sx + e.cdx * 300, sy + e.cdy * 300), 2)
+            elif e.kind == "charmer":
+                k = 1 - e.windup / S.CHARM_WINDUP
+                g = self.assets.glow(40 + 70 * k, (200, 40, 130))
+                screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
+                pygame.draw.circle(screen, (255, 120, 190), (int(sx), int(sy)), int(30 + 40 * k), 2)
+            elif e.kind == "skirmisher":
+                pygame.draw.line(screen, (255, 130, 110), (sx, sy), (sx + e.cdx * 190, sy + e.cdy * 190), 3)
             elif e.kind == "elite":
                 k = 1 - e.windup / S.ELITE_WINDUP
                 g = self.assets.glow(40 + 90 * k, (200, 150, 40))

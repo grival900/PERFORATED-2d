@@ -1,4 +1,4 @@
-"""Player, enemies and projectiles."""
+"""Player, enemies, projectiles and pickups."""
 import math
 import random
 
@@ -24,7 +24,7 @@ def _turn(cur, target, rate):
 
 
 class Player:
-    def __init__(self):
+    def __init__(self, carry=None):
         self.x, self.y = S.PLAYER_START
         self.vx = self.vy = 0.0
         self.r = S.PLAYER_RADIUS
@@ -38,14 +38,28 @@ class Player:
         self.charges = self.charge_cap = S.DASH_CHARGES
         self.recharge = S.DASH_RECHARGE
         self.recharge_t = 0.0
-        # weapon
-        self.shots = 1
-        self.cooldown = S.SHOT_COOLDOWN
-        self.damage = S.SHOT_DAMAGE
-        self.pierce = S.SHOT_PIERCE
+        # weapon stats shared by every weapon (raised by box-point upgrades)
+        self.weapons = {}                 # id -> Weapon, filled in by the game
+        self.dmg_mult = 1.0
+        self.rate_mult = 1.0              # multiplies every cooldown (lower is faster)
+        self.bonus = 0                    # extra projectiles / orbs / jumps / mines
+        self.pierce_bonus = 0
+        self.area = 1.0
         self.speed = S.PLAYER_SPEED
-        self.shot_cd = 0.3
         self.ghost_t = 0.0
+        if carry:
+            self.dmg_mult, self.rate_mult = carry["dmg_mult"], carry["rate_mult"]
+            self.bonus, self.pierce_bonus, self.area = carry["bonus"], carry["pierce_bonus"], carry["area"]
+            self.speed = carry["speed"]
+            self.hp = self.max_hp = carry["max_hp"]
+            self.charges = self.charge_cap = carry["charge_cap"]
+            self.recharge = carry["recharge"]
+
+    def snapshot(self):
+        """Everything Level 1 gave the hero that carries over to the next level."""
+        return dict(weapons=list(self.weapons), dmg_mult=self.dmg_mult, rate_mult=self.rate_mult, bonus=self.bonus,
+                    pierce_bonus=self.pierce_bonus, area=self.area, speed=self.speed, max_hp=self.max_hp,
+                    charge_cap=self.charge_cap, recharge=self.recharge)
 
     @property
     def dashing(self):
@@ -80,7 +94,6 @@ class Player:
         else:
             self.recharge_t = 0.0
         self.invuln = max(0.0, self.invuln - dt)
-        self.shot_cd = max(0.0, self.shot_cd - dt)
 
         if self.dash_t > 0:
             self.dash_t -= dt
@@ -136,12 +149,18 @@ class Enemy:
         self.flash = 0.0
         self.face = random.uniform(0, math.tau)
         self.t = random.uniform(0, 6.0)
-        self.cd = random.uniform(0.6, 1.8)    # lancer: time to next throw; elite: time to next charge
+        self.cd = random.uniform(0.6, 1.8)    # lancer: time to next throw; elite/skirmisher: time to next charge
         self.windup = 0.0
+        self.windup_max = 1.0
         self.charge_t = 0.0
         self.cdx = self.cdy = 0.0
         self.spawn_t = 0.35                   # fade/scale in
         self.detour = None                    # (dx, dy, time left): slide along an obstacle
+        self.flank = random.choice((-1, 1)) * random.uniform(0.25, 0.85)   # swing wide so groups surround
+        self.nova_i = 0
+        self.charm_t = 0.0                    # charmer: time left dragging the hero in
+        self.burst = 0                        # banker: coin spears still to fire
+        self.burst_t = 0.0
 
     def hit(self, dmg, dx, dy, force=220.0):
         self.hp -= dmg
@@ -149,6 +168,17 @@ class Enemy:
         n = _len(dx, dy) or 1.0
         self.kx += dx / n * force * self.knock
         self.ky += dy / n * force * self.knock
+
+    def steer(self, player, dist, ux, uy, lead):
+        """Direction to run in: optionally aimed at where the hero is heading, bent sideways while far away."""
+        if lead:
+            t = min(0.6, dist / max(self.speed, 1.0) * 0.5)
+            dx, dy = player.x + player.vx * t - self.x, player.y + player.vy * t - self.y
+            d = _len(dx, dy) or 1.0
+            ux, uy = dx / d, dy / d
+        a = self.flank * min(1.0, max(0.0, (dist - 140.0) / 450.0))
+        c, s = math.cos(a), math.sin(a)
+        return ux * c - uy * s, ux * s + uy * c
 
     def update(self, dt, player, level, game):
         self.t += dt
@@ -159,13 +189,36 @@ class Enemy:
         ux, uy = dx / dist, dy / dist
         mx = my = 0.0
         sp = self.speed * game.enemy_speed_mult
+        kind = self.kind
 
-        if self.kind == "sentinel":
-            mx, my = ux * sp, uy * sp
-        elif self.kind == "skirmisher":
-            wob = math.sin(self.t * 4.2) * 0.55         # weaves left/right on the way in
-            mx, my = (ux - uy * wob) * sp, (uy + ux * wob) * sp
-        elif self.kind == "lancer":
+        if kind in ("sentinel", "swarmer"):
+            sx, sy = self.steer(player, dist, ux, uy, True)
+            mx, my = sx * sp, sy * sp
+        elif kind == "bulwark":
+            if self.hp < self.max_hp * S.BULWARK_ENRAGE:
+                sp *= 1.5
+            sx, sy = self.steer(player, dist, ux, uy, False)
+            mx, my = sx * sp, sy * sp
+        elif kind == "skirmisher":
+            if self.charge_t > 0:                        # lunge
+                self.charge_t -= dt
+                mx, my = self.cdx * S.LUNGE_SPEED, self.cdy * S.LUNGE_SPEED
+            elif self.windup > 0:                        # telegraph, aim until the last instant
+                self.windup -= dt
+                if self.windup > 0.08:
+                    self.cdx, self.cdy = ux, uy
+                if self.windup <= 0:
+                    self.charge_t = S.LUNGE_TIME
+            else:
+                wob = math.sin(self.t * 4.2) * 0.55      # weaves left/right on the way in
+                sx, sy = self.steer(player, dist, ux, uy, False)
+                mx, my = (sx - sy * wob) * sp, (sy + sx * wob) * sp
+                self.cd -= dt
+                if self.cd <= 0 and dist < S.LUNGE_RANGE:
+                    self.windup = self.windup_max = S.LUNGE_WINDUP
+                    self.cd = S.LUNGE_COOLDOWN * random.uniform(0.8, 1.3)
+                    self.cdx, self.cdy = ux, uy
+        elif kind == "lancer":
             want = 340.0
             if dist > want + 40:
                 mx, my = ux * sp, uy * sp
@@ -178,14 +231,100 @@ class Enemy:
                 self.windup -= dt
                 mx, my = mx * 0.2, my * 0.2
                 if self.windup <= 0:
-                    game.spawn_spear(self.x, self.y, self.cdx, self.cdy)
+                    fan = 3 if game.stage >= game.cfg.fan_stage else 1
+                    for i in range(fan):
+                        a = (i - (fan - 1) / 2) * 0.27
+                        c, s = math.cos(a), math.sin(a)
+                        game.spawn_spear(self.x, self.y, self.cdx * c - self.cdy * s, self.cdx * s + self.cdy * c)
             elif self.cd <= 0 and dist < 560:
-                self.windup = S.SPEAR_WINDUP
-                self.cd = S.SPEAR_COOLDOWN * random.uniform(0.9, 1.2)
+                self.windup = self.windup_max = S.SPEAR_WINDUP
+                self.cd = S.SPEAR_COOLDOWN * random.uniform(0.9, 1.2) * (0.85 if game.stage >= game.cfg.fan_stage else 1.0)
                 self.cdx, self.cdy = ux, uy
             if self.windup > 0:                          # keep aiming while winding up
                 self.cdx, self.cdy = ux, uy
-        elif self.kind == "elite":
+        elif kind == "bomber":
+            if self.windup > 0:                          # fuse lit: it stops and swells, then blows
+                self.windup -= dt
+                mx, my = ux * sp * 0.15, uy * sp * 0.15
+                if self.windup <= 0:
+                    game.bomber_explode(self)
+            else:
+                sx, sy = self.steer(player, dist, ux, uy, True)
+                mx, my = sx * sp, sy * sp
+                if dist < S.BOMBER_RANGE and self.spawn_t <= 0:
+                    self.windup = self.windup_max = S.BOMBER_FUSE
+        elif kind == "banker":
+            want = 400.0
+            if dist > want + 50:
+                mx, my = ux * sp, uy * sp
+            elif dist < want - 90:
+                mx, my = -ux * sp * 0.8, -uy * sp * 0.8
+            else:
+                mx, my = -uy * sp * 0.55, ux * sp * 0.55
+            self.cd -= dt
+            if self.windup > 0:
+                self.windup -= dt
+                mx, my = mx * 0.2, my * 0.2
+                self.cdx, self.cdy = ux, uy
+                if self.windup <= 0:
+                    self.burst, self.burst_t = S.BANKER_BURST, 0.0
+            elif self.burst > 0:                         # a burst of coin spears, each aimed where you are now
+                mx, my = mx * 0.2, my * 0.2
+                self.burst_t -= dt
+                if self.burst_t <= 0:
+                    self.burst -= 1
+                    self.burst_t = S.BANKER_GAP
+                    game.spawn_spear(self.x, self.y, ux, uy)
+            elif self.cd <= 0 and dist < 620:
+                self.windup = self.windup_max = 0.4
+                self.cd = 2.8 * random.uniform(0.85, 1.2)
+                self.cdx, self.cdy = ux, uy
+        elif kind == "cupid":
+            want = 470.0
+            if dist > want + 50:
+                mx, my = ux * sp, uy * sp
+            elif dist < want - 100:
+                mx, my = -ux * sp * 0.8, -uy * sp * 0.8
+            else:
+                mx, my = -uy * sp * 0.6, ux * sp * 0.6
+            self.cd -= dt
+            if self.windup > 0:
+                self.windup -= dt
+                mx, my = mx * 0.2, my * 0.2
+                self.cdx, self.cdy = ux, uy
+                if self.windup <= 0:                     # a volley of slow homing hearts
+                    n = S.CUPID_HEARTS
+                    for i in range(n):
+                        a = (i - (n - 1) / 2) * 0.7
+                        c, s = math.cos(a), math.sin(a)
+                        game.spawn_spear(self.x, self.y, ux * c - uy * s, ux * s + uy * c, homing=True)
+            elif self.cd <= 0 and dist < 680:
+                self.windup = self.windup_max = 0.5
+                self.cd = 3.2 * random.uniform(0.85, 1.2)
+                self.cdx, self.cdy = ux, uy
+        elif kind == "charmer":
+            want = 430.0
+            if dist > want + 50:
+                mx, my = ux * sp, uy * sp
+            elif dist < want - 100:
+                mx, my = -ux * sp * 0.8, -uy * sp * 0.8
+            else:
+                mx, my = -uy * sp * 0.5, ux * sp * 0.5
+            if self.charm_t > 0:                         # dragging the hero in; a dash breaks free
+                self.charm_t -= dt
+                mx, my = mx * 0.2, my * 0.2
+                game.charm_pull(self, dt)
+            elif self.windup > 0:
+                self.windup -= dt
+                mx, my = mx * 0.2, my * 0.2
+                if self.windup <= 0:
+                    self.charm_t = S.CHARM_TIME
+            else:
+                self.cd -= dt
+                if self.cd <= 0 and dist < S.CHARM_RANGE and self.spawn_t <= 0:
+                    self.windup = self.windup_max = S.CHARM_WINDUP
+                    self.cd = S.CHARM_COOLDOWN * random.uniform(0.85, 1.2)
+        elif kind == "elite":
             if self.charge_t > 0:
                 self.charge_t -= dt
                 mx, my = self.cdx * S.ELITE_CHARGE_SPEED, self.cdy * S.ELITE_CHARGE_SPEED
@@ -195,12 +334,19 @@ class Enemy:
                 if self.windup <= 0:
                     self.charge_t = S.ELITE_CHARGE_TIME
                     game.assets.play("slam")
+            elif self.nova_i < len(game.cfg.nova_marks) and self.hp <= self.max_hp * game.cfg.nova_marks[self.nova_i]:
+                self.nova_i += 1                         # at set health marks: a ring of light spears
+                n = game.cfg.nova_spears
+                for i in range(n):
+                    a = i * math.tau / n + self.t
+                    game.spawn_spear(self.x, self.y, math.cos(a), math.sin(a))
+                game.assets.play("elite")
             else:
                 mx, my = ux * sp, uy * sp
                 self.cd -= dt
                 if self.cd <= 0 and dist < 700:
-                    self.windup = S.ELITE_WINDUP
-                    self.cd = S.ELITE_CHARGE_COOLDOWN
+                    self.windup = self.windup_max = S.ELITE_WINDUP
+                    self.cd = S.ELITE_CHARGE_COOLDOWN * (0.8 if game.stage >= game.cfg.elite_rage_stage else 1.0)
                     self.cdx, self.cdy = ux, uy
             if self.windup > 0:
                 self.cdx, self.cdy = ux, uy
@@ -225,32 +371,37 @@ class Enemy:
                 side = 1.0 if self.id % 2 == 0 else -1.0
             sgn = 1.0 if side > 0 else -1.0
             self.detour = (tx * sgn, ty * sgn, 0.7)
-        if self.kind in ("lancer", "elite") and self.windup > 0:
+        if kind in ("lancer", "elite", "skirmisher", "banker", "cupid") and self.windup > 0:
             self.face = _turn(self.face, _dir_to_angle(self.cdx, self.cdy), 10 * dt)
         else:
             self.face = _turn(self.face, _dir_to_angle(ux, uy), 8 * dt)
 
 
 class Shot:
-    """The hero's piercing needle."""
-    __slots__ = ("x", "y", "vx", "vy", "life", "dmg", "pierce", "hit")
+    """A hero projectile: needle, scatter pellet or homing seeker."""
+    __slots__ = ("x", "y", "vx", "vy", "life", "dmg", "pierce", "hit", "kind", "r", "speed")
 
-    def __init__(self, x, y, vx, vy, dmg, pierce):
+    def __init__(self, x, y, vx, vy, dmg, pierce, kind="needle", life=S.SHOT_LIFE, r=9):
         self.x, self.y, self.vx, self.vy = x, y, vx, vy
-        self.life = S.SHOT_LIFE
+        self.life = life
         self.dmg = dmg
         self.pierce = pierce
         self.hit = set()
+        self.kind = kind
+        self.r = r
+        self.speed = math.hypot(vx, vy)
 
 
 class Spear:
     """Light spear thrown by lancers."""
-    __slots__ = ("x", "y", "vx", "vy", "life")
+    __slots__ = ("x", "y", "vx", "vy", "life", "homing")
 
-    def __init__(self, x, y, ux, uy):
+    def __init__(self, x, y, ux, uy, homing=False):
         self.x, self.y = x + ux * 30, y + uy * 30
-        self.vx, self.vy = ux * S.SPEAR_SPEED, uy * S.SPEAR_SPEED
-        self.life = S.SPEAR_LIFE
+        sp = S.HEART_SPEED if homing else S.SPEAR_SPEED
+        self.vx, self.vy = ux * sp, uy * sp
+        self.life = S.HEART_LIFE if homing else S.SPEAR_LIFE
+        self.homing = homing                  # a cupid's heart: slow, curves after the hero
 
 
 class HeartPickup:
@@ -259,3 +410,54 @@ class HeartPickup:
         self.alive = True
         self.timer = 0.0
         self.respawns = respawns
+
+
+class Box:
+    """A breakable crate: walk (or dash) over it and it bursts into box points."""
+    __slots__ = ("x", "y", "gilded", "t")
+    r = 26
+
+    def __init__(self, x, y, gilded=False):
+        self.x, self.y, self.gilded = x, y, gilded
+        self.t = random.uniform(0, 6.0)
+
+
+class Gem:
+    """A box-point gem. It lies where it fell, then flies to the hero when close."""
+    __slots__ = ("x", "y", "vx", "vy", "val", "life", "age", "t")
+
+    def __init__(self, x, y, val):
+        a = random.uniform(0, math.tau)
+        sp = random.uniform(120, 300)
+        self.x, self.y = x, y
+        self.vx, self.vy = math.cos(a) * sp, math.sin(a) * sp
+        self.val = val
+        self.life = S.GEM_LIFE
+        self.age = 0.0
+        self.t = random.uniform(0, 6.0)
+
+
+class Mine:
+    __slots__ = ("x", "y", "age", "life", "dmg", "radius")
+
+    def __init__(self, x, y, dmg, radius):
+        self.x, self.y = x, y
+        self.age = 0.0
+        self.life = S.MINE_LIFE
+        self.dmg = dmg
+        self.radius = radius
+
+
+class Chakram:
+    """Thrown out, then recalled to the hero; pierces everything on the way."""
+    __slots__ = ("x", "y", "dx", "dy", "dist", "going", "traveled", "hit", "spin", "dmg", "life")
+
+    def __init__(self, x, y, dx, dy, dist, dmg):
+        self.x, self.y, self.dx, self.dy = x, y, dx, dy
+        self.dist = dist
+        self.going = True
+        self.traveled = 0.0
+        self.hit = set()
+        self.spin = 0.0
+        self.dmg = dmg
+        self.life = 4.0

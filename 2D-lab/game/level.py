@@ -4,18 +4,43 @@ import random
 
 import pygame
 
-from settings import (ALTAR_POS, ARENA, GATE_X0, GATE_X1, HEART_SPOTS, WALL)
+from settings import (ALTAR_POS, ARENA, GATE_X0, GATE_X1, HEART_SPOTS, THEMES, WALL)
 
 SURF = ARENA + 2 * WALL          # size of the baked floor image
 GOLD = (236, 196, 92)
 GOLD_D = (140, 98, 34)
 
-# pillar centres (from the level sketch, scaled to the arena); footprint is a 124 px square
-PILLARS = [(423, 459), (1377, 459), (423, 1323), (1377, 1323)]
+# pillar centres; footprint is a 124 px square
+PILLARS = [(705, 765), (2295, 765), (705, 2235), (2295, 2235),
+           (1500, 2500), (420, 1500), (2580, 1500), (1100, 1180), (1900, 1180)]
 PILLAR_HALF = 62
 # low walls block movement but not shots: (x, y, w, h)
-LOW_WALLS = [(720, 756, 360, 54), (144, 828, 54, 324), (1602, 828, 54, 324)]
-BRAZIERS = [(150, 150), (1650, 150), (150, 1650), (1650, 1650), (655, 62), (1145, 62)]
+LOW_WALLS = [(1200, 1410, 600, 54), (240, 1230, 54, 540), (2706, 1230, 54, 540),
+             (900, 2330, 300, 54), (1800, 2330, 300, 54), (1130, 480, 54, 260), (1816, 480, 54, 260)]
+BRAZIERS = [(150, 150), (ARENA - 150, 150), (150, ARENA - 150), (ARENA - 150, ARENA - 150),
+            (ARENA // 2 - 345, 62), (ARENA // 2 + 345, 62),
+            (150, ARENA // 2), (ARENA - 150, ARENA // 2), (ARENA // 2, ARENA - 150)]
+MINIMAP = 200
+
+LAYOUT3_PILLARS = ([(1500 + round(950 * math.cos(i * math.pi / 4)), 1500 + round(950 * math.sin(i * math.pi / 4)))
+                    for i in range(8) if i != 6] + [(1797, 1797), (1203, 1797), (1797, 1203), (1203, 1203)])
+
+LAYOUTS = {
+    1: dict(pillars=PILLARS, low_walls=LOW_WALLS, braziers=BRAZIERS),
+    # Level 2, the vault: heavy safes and teller counters that chop the floor into lanes
+    2: dict(pillars=[(650, 700), (2350, 700), (650, 2300), (2350, 2300), (1100, 1150), (1900, 1150),
+                     (1100, 1850), (1900, 1850), (450, 1500), (2550, 1500), (1500, 2600)],
+            low_walls=[(1250, 1480, 500, 54), (300, 900, 420, 54), (2280, 900, 420, 54), (300, 2100, 420, 54),
+                       (2280, 2100, 420, 54), (1000, 2420, 54, 300), (1946, 2420, 54, 300),
+                       (1000, 760, 54, 260), (1946, 760, 54, 260), (800, 1500, 54, 380), (2146, 1500, 54, 380)],
+            braziers=BRAZIERS),
+    # Level 3, the boudoir: a ring of columns round the centre, heavy curtains between them
+    3: dict(pillars=LAYOUT3_PILLARS,
+            low_walls=[(650, 1100, 420, 54), (1930, 1100, 420, 54), (650, 1900, 420, 54), (1930, 1900, 420, 54),
+                       (1100, 2650, 300, 54), (1600, 2650, 300, 54), (300, 1300, 54, 400), (2646, 1300, 54, 400),
+                       (1100, 640, 54, 240), (1846, 640, 54, 240), (1400, 1500, 200, 54)],
+            braziers=BRAZIERS),
+}
 
 
 def _circle_rect_push(x, y, r, rect):
@@ -43,13 +68,18 @@ def _circle_rect_push(x, y, r, rect):
 
 
 class Level:
-    def __init__(self, assets):
+    def __init__(self, assets, num=1):
         self.a = assets
+        self.num = num
+        self.theme = THEMES[num]
+        lay = LAYOUTS[num]
+        self.pillars, self.low_walls, self.braziers = lay["pillars"], lay["low_walls"], lay["braziers"]
         self.solid = [pygame.Rect(cx - PILLAR_HALF, cy - PILLAR_HALF, PILLAR_HALF * 2, PILLAR_HALF * 2)
-                      for cx, cy in PILLARS]
+                      for cx, cy in self.pillars]
         self.shot_blockers = list(self.solid)
-        self.solid += [pygame.Rect(*r) for r in LOW_WALLS]
+        self.solid += [pygame.Rect(*r) for r in self.low_walls]
         self.floor = None
+        self.minimap = None
         self.gate_open = False
         self.gate_open_t = 0.0
         self.last_normal = None      # direction we were pushed by the last solid (for steering)
@@ -57,6 +87,7 @@ class Level:
     # ------------------------------------------------------------------ baking
     def bake(self):
         a = self.a
+        money = self.theme["style"] == "money"
         rng = random.Random(11)
         s = pygame.Surface((SURF, SURF))
         s.fill((12, 12, 22))
@@ -71,6 +102,8 @@ class Level:
             for gx in range(0, ARENA, 128):
                 tile = a.img[f"marble_{rng.randrange(8)}"].copy()
                 v = rng.randint(226, 255)
+                if money and (gx // 128 + gy // 128) % 2:         # bank-lobby checkerboard
+                    v = int(v * 0.74)
                 tile.fill((v, v, min(255, v + 4)), special_flags=pygame.BLEND_RGB_MULT)
                 s.blit(tile, (WALL + gx, WALL + gy))
         s.set_clip(None)
@@ -80,16 +113,19 @@ class Level:
 
         # gold inlay: inset square and two rings round the sigil
         inset = pygame.Rect(W((170, 170)), (ARENA - 340, ARENA - 340))
-        for off, col, w in [(0, GOLD_D, 10), (3, GOLD, 4)]:
+        gold_d, gold = self.theme.get("inlay", (GOLD_D, GOLD))
+        for off, col, w in [(0, gold_d, 10), (3, gold, 4)]:
             pygame.draw.rect(s, col, inset.inflate(-off * 2, -off * 2), w)
         for cx, cy in [(170, 170), (ARENA - 170, 170), (170, ARENA - 170), (ARENA - 170, ARENA - 170)]:
-            pygame.draw.circle(s, GOLD_D, W((cx, cy)), 26)
-            pygame.draw.circle(s, GOLD, W((cx, cy)), 20)
-            pygame.draw.circle(s, GOLD_D, W((cx, cy)), 9)
-        for r, w in [(700, 6), (640, 3)]:
-            pygame.draw.circle(s, GOLD_D, W((ARENA // 2, ARENA // 2)), r, w + 3)
-            pygame.draw.circle(s, GOLD, W((ARENA // 2, ARENA // 2)), r, w)
-        sig = pygame.transform.smoothscale(a.img["sigil"], (900, 900))
+            pygame.draw.circle(s, gold_d, W((cx, cy)), 26)
+            pygame.draw.circle(s, gold, W((cx, cy)), 20)
+            pygame.draw.circle(s, gold_d, W((cx, cy)), 9)
+        for r, w in [(1150, 6), (1090, 3)]:
+            pygame.draw.circle(s, gold_d, W((ARENA // 2, ARENA // 2)), r, w + 3)
+            pygame.draw.circle(s, gold, W((ARENA // 2, ARENA // 2)), r, w)
+        sig = pygame.transform.smoothscale(a.img["sigil"], (1500, 1500))
+        if self.theme.get("decor"):
+            sig.set_alpha(self.theme.get("emblem_alpha", 70))   # dim, so the floor does not drown the action
         s.blit(sig, sig.get_rect(center=W((ARENA // 2, ARENA // 2))))
 
         # soft dark band along the walls (ambient occlusion)
@@ -104,8 +140,18 @@ class Level:
         pygame.draw.rect(s, (132, 126, 170), floor_rect.inflate(6, 6), 3)
         pygame.draw.rect(s, (20, 18, 34), floor_rect.inflate(14, 14), 6)
 
+        if self.theme.get("decor"):                 # loose coins, banknotes, petals... on the floor
+            d1, d2 = self.theme["decor"]
+            for _ in range(260):
+                x, y = rng.uniform(150, ARENA - 150), rng.uniform(150, ARENA - 150)
+                if any(r.inflate(60, 60).collidepoint(x, y) for r in self.solid):
+                    continue
+                spr = a.img[d1 if rng.random() < 0.65 else d2]
+                spr = pygame.transform.rotate(spr, rng.uniform(0, 360))
+                s.blit(spr, spr.get_rect(center=W((x, y))))
+
         # low walls
-        for x, y, w, h in LOW_WALLS:
+        for x, y, w, h in self.low_walls:
             r = pygame.Rect(W((x, y)), (w, h))
             shadow = pygame.Surface((w + 24, h + 24), pygame.SRCALPHA)
             pygame.draw.rect(shadow, (0, 0, 8, 120), shadow.get_rect().inflate(-6, -6), border_radius=8)
@@ -115,21 +161,41 @@ class Level:
                 for tx in range(r.left - r.left % 96, r.right, 96):
                     s.blit(wall, (tx, ty))
             s.set_clip(None)
-            pygame.draw.rect(s, GOLD_D, r, 6, border_radius=3)
-            pygame.draw.rect(s, GOLD, r.inflate(-6, -6), 2, border_radius=2)
+            pygame.draw.rect(s, gold_d, r, 6, border_radius=3)
+            pygame.draw.rect(s, gold, r.inflate(-6, -6), 2, border_radius=2)
             pygame.draw.line(s, (200, 194, 236), r.topleft, (r.right, r.top), 2)
 
         # pillars (texture already has a baked drop shadow)
-        for cx, cy in PILLARS:
+        for cx, cy in self.pillars:
             t = a.img["pillar"]
             s.blit(t, t.get_rect(center=W((cx, cy))))
         # braziers and altar
-        for bx, by in BRAZIERS:
+        for bx, by in self.braziers:
             t = a.img["brazier"]
             s.blit(t, t.get_rect(center=W((bx, by))))
         t = a.img["altar"]
         s.blit(t, t.get_rect(center=W(ALTAR_POS)))
         self.floor = s.convert()
+        self.minimap = pygame.transform.smoothscale(self.floor.subsurface(pygame.Rect(WALL, WALL, ARENA, ARENA)),
+                                                    (MINIMAP, MINIMAP))
+        self.minimap.set_alpha(215)
+
+    # ------------------------------------------------------------------ placement
+    def is_free(self, x, y, margin=40):
+        """True if a prop of radius `margin` fits at (x, y): inside the arena, off obstacles, away from props."""
+        if not (110 < x < ARENA - 110 and 110 < y < ARENA - 110):
+            return False
+        for rect in self.solid:
+            if rect.inflate(margin * 2, margin * 2).collidepoint(x, y):
+                return False
+        for bx, by in self.braziers:
+            if (bx - x) ** 2 + (by - y) ** 2 < 120 ** 2:
+                return False
+        if (ALTAR_POS[0] - x) ** 2 + (ALTAR_POS[1] - y) ** 2 < 190 ** 2:
+            return False
+        if y < 330 and GATE_X0 - 120 < x < GATE_X1 + 120:      # keep the gate approach clear
+            return False
+        return True
 
     # ------------------------------------------------------------------ collision
     def collide(self, x, y, r, through_gate=None):
@@ -174,9 +240,9 @@ class Level:
     def static_lights(self, t):
         """(x, y, radius, colour) of the level's own lights; braziers flicker."""
         out = []
-        for i, (bx, by) in enumerate(BRAZIERS):
+        for i, (bx, by) in enumerate(self.braziers):
             f = 0.82 + 0.18 * math.sin(t * 9.0 + i * 1.7) * math.sin(t * 5.3 + i)
-            out.append((bx, by, 330 * f, (255, 168, 78)))
+            out.append((bx, by, 330 * f, self.theme["brazier"]))
         out.append((ALTAR_POS[0], ALTAR_POS[1], 260, (60, 235, 215)))
         gx = (GATE_X0 + GATE_X1) / 2
         if self.gate_open:
@@ -201,12 +267,12 @@ class Level:
     def draw_flames(self, screen, cam, t):
         """Additive flames above the braziers (drawn after lighting so they stay bright)."""
         a = self.a
-        for i, (bx, by) in enumerate(BRAZIERS):
+        for i, (bx, by) in enumerate(self.braziers):
             sx, sy = bx - cam[0], by - cam[1]
             if sx < -80 or sx > screen.get_width() + 80 or sy < -80 or sy > screen.get_height() + 80:
                 continue
             f = 0.85 + 0.15 * math.sin(t * 11 + i * 2.1)
-            g = a.glow(34 * f, (255, 150, 40))
+            g = a.glow(34 * f, self.theme["flame"])
             screen.blit(g, g.get_rect(center=(sx, sy - 4)), special_flags=pygame.BLEND_RGB_ADD)
-            g2 = a.glow(16 * f, (255, 240, 170))
+            g2 = a.glow(16 * f, self.theme["flame_core"])
             screen.blit(g2, g2.get_rect(center=(sx + math.sin(t * 7 + i) * 2, sy - 8 - 3 * f)), special_flags=pygame.BLEND_RGB_ADD)
