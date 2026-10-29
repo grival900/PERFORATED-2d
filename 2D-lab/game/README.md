@@ -101,6 +101,21 @@ and spawning more than twice as fast as Level 2. Winning Level 3 ends the game.
 
 Bombers, bankers and everything from Level 2 are mixed in too, lancers fan three spears from wave 2, and elites throw spear rings at 80, 60, 40 and 20 % health.
 
+## Bosses
+
+Every level's **final wave brings a boss**, and **the gate stays shut until it is dead** (even with a full Pride bar). It has a health bar at the top of the screen,
+keeps its distance, rests between attacks and gets faster and nastier below half health. The regular wave thins out while it is alive. Its attacks are themed by the sin:
+
+| Level | Boss | Attacks |
+|---|---|---|
+| 1 Pride | The Crowned Guardian | ring of light spears, aimed fans, **pillars of light** (telegraphed circles), a slam charge with a shockwave, calls sentinels and skirmishers |
+| 2 Greed | The Chief Banker | volleys of coin spears, a **coin storm** spiral, **gold bombs** (circles on the floor), a bulldozing charge, summons bombers and bankers |
+| 3 Lust | The Mistress of Desire | the **charm** (drags you in; dash to break it), a ring of homing hearts, a petal spiral, **rose bursts** on the floor, summons cupids and a charmer |
+
+Every attack is telegraphed (glow, line or circle in the boss's colour) before it hits; stepping out of a circle or dashing through a line is the answer.
+
+Melee guardians (sentinels, skirmishers, swarmers, bulwarks, bombers, elites) never retreat; only the ranged ones (lancers, bankers, cupids, charmers) keep their distance.
+
 Everything above is tuned in `settings.py`. The bar size and the wave thresholds are derived from `STAGE_SECONDS` and the spawn tables,
 so changing a spawn rate or a duration re-balances the whole level.
 
@@ -124,7 +139,7 @@ tools/         asset generators, tests and balance simulation
 ## Tests (no window or sound needed)
 
 ```
-python tools/menu_test.py          # 100 checks: menus, dash, boxes and gems, waves and weapons, gate, win/lose, restart
+python tools/menu_test.py          # 128 checks: menus, dash, boxes and gems, waves and weapons, gate, win/lose, restart
 python tools/bot_test.py 330 shots # a bot plays the level; saves screenshots into ./shots (add --god to keep it alive)
 python tools/sim_stats.py 10       # many full runs without drawing: how far the bot gets (--god: how long a full run takes)
 python tools/sim_stats.py 10 --level 3   # the same for Level 2 or 3 (the bot starts with a sample carried-over loadout; --demo gives one to Level 1 too)

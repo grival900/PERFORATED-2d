@@ -175,7 +175,8 @@ class Enemy:
             t = min(0.6, dist / max(self.speed, 1.0) * 0.5)
             dx, dy = player.x + player.vx * t - self.x, player.y + player.vy * t - self.y
             d = _len(dx, dy) or 1.0
-            ux, uy = dx / d, dy / d
+            if (dx * ux + dy * uy) / d > 0.5:          # only lead when it still points at the hero
+                ux, uy = dx / d, dy / d
         a = self.flank * min(1.0, max(0.0, (dist - 140.0) / 450.0))
         c, s = math.cos(a), math.sin(a)
         return ux * c - uy * s, ux * s + uy * c
@@ -351,6 +352,11 @@ class Enemy:
             if self.windup > 0:
                 self.cdx, self.cdy = ux, uy
 
+        if kind in S.MELEE_KINDS and self.charge_t <= 0:
+            back = mx * ux + my * uy
+            if back < 0:
+                mx, my = mx - back * ux, my - back * uy
+
         if self.detour is not None:
             ddx, ddy, left = self.detour
             left -= dt
@@ -461,3 +467,180 @@ class Chakram:
         self.spin = 0.0
         self.dmg = dmg
         self.life = 4.0
+
+
+class Hazard:
+    """A telegraphed ground blast: a growing circle, then damage to anyone still inside."""
+    __slots__ = ("x", "y", "r", "t", "dur", "style")
+
+    def __init__(self, x, y, r, dur, style):
+        self.x, self.y, self.r, self.dur, self.style = x, y, r, dur, style
+        self.t = 0.0
+
+
+class Boss(Enemy):
+    """A level boss: keeps its distance and cycles through themed attacks, faster once below half health."""
+
+    def __init__(self, x, y, spec):
+        super().__init__("elite", x, y, 1.0)
+        self.kind = "boss"
+        self.spec = spec
+        self.hp = self.max_hp = float(spec["hp"])
+        self.r = spec["r"]
+        self.sprite = "guardian_boss"
+        self.shadow = 150
+        self.knock = 0.0
+        self.pts = 0
+        self.speed = spec["speed"]
+        self.spawn_t = 1.0
+        self.act = None               # current attack
+        self.act_t = 0.0
+        self.rest = 2.4
+        self.last = None
+        self.tele = 0.0               # 0..1 progress of the current wind-up (for drawing)
+        self.aim = (0.0, 1.0)
+        self.fired = 0
+        self.side = random.choice((-1, 1))
+        self.spin = random.uniform(0, math.tau)
+
+    @property
+    def enraged(self):
+        return self.hp < self.max_hp * 0.5
+
+    def begin(self):
+        moves = [m for m in self.spec["moves"] if m != self.last]
+        self.act = self.last = random.choice(moves)
+        self.act_t, self.fired, self.tele = 0.0, 0, 0.0
+
+    def end(self):
+        self.act = None
+        self.tele = 0.0
+        self.rest = 0.9 if self.enraged else 1.6
+
+    def update(self, dt, player, level, game):
+        self.t += dt
+        self.flash = max(0.0, self.flash - dt)
+        self.spawn_t = max(0.0, self.spawn_t - dt)
+        dx, dy = player.x - self.x, player.y - self.y
+        dist = _len(dx, dy) or 1.0
+        ux, uy = dx / dist, dy / dist
+        sp = self.speed * (1.3 if self.enraged else 1.0)
+        mx = my = 0.0
+        if self.act is None:
+            if dist > 430:
+                mx, my = ux * sp, uy * sp
+            elif dist < 280:
+                mx, my = -ux * sp * 0.7, -uy * sp * 0.7
+            else:
+                mx, my = -uy * sp * 0.5 * self.side, ux * sp * 0.5 * self.side
+            self.rest -= dt
+            if self.rest <= 0 and self.spawn_t <= 0:
+                self.begin()
+        else:
+            mx, my = self.run(dt, player, game, ux, uy)
+        self.x += mx * dt
+        self.y += my * dt
+        self.x, self.y, _ = level.collide(self.x, self.y, self.r, through_gate=False)
+        want = self.aim if self.act in ("fan", "charge") else (ux, uy)
+        self.face = _turn(self.face, _dir_to_angle(*want), 6 * dt)
+
+    # ---- the attacks ------------------------------------------------------------------------
+    def ring(self, game, offset):
+        sp = self.spec
+        n = sp["ring_n"] if not sp["ring_homing"] else (7 if not self.enraged else 10)
+        if self.enraged and not sp["ring_homing"]:
+            n = int(n * 1.5)
+        for i in range(n):
+            a = offset + i * math.tau / n
+            game.spawn_spear(self.x, self.y, math.cos(a), math.sin(a), homing=sp["ring_homing"])
+        game.fx.ring(self.x, self.y, sp["color"], 260, 0.5, 8)
+
+    def run(self, dt, p, game, ux, uy):
+        a, t, enr, spec = self.act, self.act_t + dt, self.enraged, self.spec
+        self.act_t = t
+        mx = my = 0.0
+        if a == "ring":
+            W = 0.9
+            self.tele = min(1.0, t / W)
+            if t >= W and self.fired == 0:
+                self.fired = 1
+                self.ring(game, 0.0)
+            if t >= W + 0.55 and self.fired == 1:
+                self.fired = 2
+                self.ring(game, math.pi / 9)
+            if t >= W + 0.9:
+                self.end()
+        elif a == "fan":
+            W, nv = 0.6, (4 if enr else 3)
+            self.tele = min(1.0, t / W)
+            if t < W - 0.15:
+                self.aim = (ux, uy)
+            if self.fired < nv and t >= W + self.fired * 0.4:
+                self.fired += 1
+                base = math.atan2(uy, ux)
+                n = 7 if enr else 5
+                for i in range(n):
+                    ang = base + (i - (n - 1) / 2) * 0.2
+                    game.spawn_spear(self.x, self.y, math.cos(ang), math.sin(ang))
+            if self.fired >= nv and t > W + nv * 0.4:
+                self.end()
+        elif a == "zones":
+            W = 0.5
+            self.tele = min(1.0, t / W)
+            if t >= W and self.fired == 0:
+                self.fired = 1
+                n = 6 if enr else 4
+                game.spawn_hazard(p.x + p.vx * 0.5, p.y + p.vy * 0.5, 115, 1.1, spec["zone"])
+                for _ in range(n - 1):
+                    ang, rad = random.uniform(0, math.tau), random.uniform(120, 320)
+                    game.spawn_hazard(p.x + math.cos(ang) * rad, p.y + math.sin(ang) * rad, 115, 1.1, spec["zone"])
+            if t >= W + 0.5:
+                self.end()
+        elif a == "charge":
+            W = 0.8
+            self.tele = min(1.0, t / W)
+            if t < W - 0.2:
+                self.aim = (ux, uy)
+            elif W <= t < W + 0.6:
+                mx, my = self.aim[0] * 640.0, self.aim[1] * 640.0
+            if t >= W + 0.6 and self.fired == 0:
+                self.fired = 1
+                game.spawn_hazard(self.x, self.y, 240, 0.3, spec["zone"])
+                game.shake = max(game.shake, 0.5)
+            if t >= W + 0.95:
+                self.end()
+        elif a == "summon":
+            W = 1.0
+            self.tele = min(1.0, t / W)
+            if t >= W and self.fired == 0:
+                self.fired = 1
+                for kind, n in spec["summon"]:
+                    for _ in range(n):
+                        ang = random.uniform(0, math.tau)
+                        game.spawn_enemy(kind, self.x + math.cos(ang) * 130, self.y + math.sin(ang) * 130)
+                game.fx.ring(self.x, self.y, spec["color"], 300, 0.6, 10)
+                game.assets.play("elite")
+            if t >= W + 0.6:
+                self.end()
+        elif a == "spiral":
+            W, total = 0.5, (34 if enr else 26)
+            self.tele = min(1.0, t / W)
+            while self.fired < total and t >= W + self.fired * 0.1:
+                ang = self.spin + self.fired * 0.45
+                for k in range(2 if enr else 1):
+                    game.spawn_spear(self.x, self.y, math.cos(ang + k * math.pi), math.sin(ang + k * math.pi))
+                self.fired += 1
+            if self.fired >= total:
+                self.end()
+        elif a == "charm":
+            W = 0.8
+            self.tele = min(1.0, t / W)
+            if t >= W and self.fired == 0:
+                self.fired = 1
+                self.charm_t = 1.7
+            if self.fired == 1:
+                self.charm_t -= dt
+                game.charm_pull(self, dt)
+                if self.charm_t <= 0:
+                    self.end()
+        return mx, my

@@ -31,7 +31,7 @@ DASH_DAMAGE = 2              # the dash perforates enemies it passes through
 # ---- weapons -----------------------------------------------------------------
 # Every weapon fires on its own; the needle is the starting one and each new wave
 # lets the Ferryman unlock another (a choice of three), so runs end up with different combos.
-SHOT_COOLDOWN = 0.45
+SHOT_COOLDOWN = 0.38
 SHOT_SPEED = 780.0
 SHOT_DAMAGE = 1.0
 SHOT_PIERCE = 2
@@ -119,6 +119,13 @@ CUPID_HEARTS = 2             # slow homing hearts per volley
 HEART_SPEED = 270.0
 HEART_TURN = 1.7             # rad/s: they curve after you, but you can outrun and shoot them
 HEART_LIFE = 4.5
+ENEMY_HP_BOOST = 1.35        # every guardian, every level: healthier...
+ENEMY_SPEED_BOOST = 1.15     # ...and faster
+for _k, _st in ENEMIES.items():
+    _st["hp"] = _st["hp"] * ENEMY_HP_BOOST
+    _st["speed"] = min(_st["speed"] * ENEMY_SPEED_BOOST, 245.0) if _k in ("skirmisher", "swarmer", "bomber") \
+        else _st["speed"] * ENEMY_SPEED_BOOST
+MELEE_KINDS = ("sentinel", "skirmisher", "swarmer", "bulwark", "bomber", "elite")   # these never back away
 BOMBER_RANGE = 150.0         # starts its fuse this close
 BOMBER_FUSE = 0.7
 BOMBER_BLAST = 150.0         # blast radius: step out of the red circle
@@ -284,6 +291,16 @@ LEVEL3 = LevelCfg(3, STAGES_3, (36, 38, 42, 46, 50, 54),
                   elites={2: 2, 3: 3, 4: 3, 5: 4, 6: 6}, lancer_cap=14, swarm_pack=(12, 16),
                   hp_mult=4.2, speed_mult=1.25, elite_hp_mult=2.6, fan_stage=2, elite_rage_stage=3,
                   nova_marks=(0.8, 0.6, 0.4, 0.2), nova_spears=16)
+# One boss per level, arriving with the final wave. The level's gate stays shut until it is dead.
+# moves: what it can do (ring / fan / zones / charge / summon / spiral / charm); zone = look of the ground blasts.
+BOSS1 = dict(name="pride", hp=520, r=62, speed=95.0, color=(255, 226, 140), zone="light", ring_n=16, ring_homing=False,
+             moves=["ring", "fan", "zones", "charge", "summon"], summon=[("sentinel", 4), ("skirmisher", 2)])
+BOSS2 = dict(name="greed", hp=1100, r=62, speed=100.0, color=(255, 214, 80), zone="gold", ring_n=18, ring_homing=False,
+             moves=["fan", "spiral", "zones", "summon", "charge"], summon=[("bomber", 3), ("banker", 2)])
+BOSS3 = dict(name="lust", hp=2000, r=64, speed=105.0, color=(255, 100, 170), zone="rose", ring_n=8, ring_homing=True,
+             moves=["charm", "ring", "spiral", "zones", "summon", "fan"], summon=[("cupid", 3), ("charmer", 1)])
+LEVEL1.boss, LEVEL2.boss, LEVEL3.boss = BOSS1, BOSS2, BOSS3
+BOSS_CAP_FACTOR = 0.55       # the regular wave thins out while the boss is alive
 LEVELS = {1: LEVEL1, 2: LEVEL2, 3: LEVEL3}
 NUM_LEVELS = len(LEVELS)
 RANGED_KINDS = ("lancer", "banker", "cupid")      # share one alive-at-once cap per level
@@ -300,7 +317,7 @@ DEMO_CARRY_LATE = dict(weapons=["needle", "halo", "pulse", "arc", "chakram", "mi
 # per-level look: lighting, colours, texture tints (multiplied into the textures/sprites)
 THEMES = {
     1: dict(name="pride", style="stone", ambient=(62, 68, 98), gem=(80, 235, 205), bar=(70, 225, 195),
-            brazier=(255, 168, 78), flame=(255, 150, 40), flame_core=(255, 240, 170), tints={}),
+            brazier=(255, 168, 78), flame=(255, 150, 40), flame_core=(255, 240, 170), tints={}, boss_tint=(255, 232, 150)),
     2: dict(name="greed", style="money", ambient=(46, 80, 64), gem=(255, 215, 80), bar=(255, 205, 70),
             brazier=(110, 255, 150), flame=(60, 230, 110), flame_core=(210, 255, 190),
             inlay=((20, 90, 50), (255, 214, 90)), decor=("coin_decor", "bill_decor"), emblem_alpha=70,
@@ -308,7 +325,7 @@ THEMES = {
                    "brazier": (160, 255, 190), "gate_closed": (170, 255, 190), "gate_open": (170, 255, 190),
                    "guardian_sentinel": (170, 255, 190), "guardian_skirmisher": (160, 255, 175),
                    "guardian_lancer": (200, 255, 170), "guardian_elite": (255, 240, 140)},
-            swarmer_tint=(255, 235, 130), bulwark_tint=(150, 235, 160)),
+            swarmer_tint=(255, 235, 130), bulwark_tint=(150, 235, 160), boss_tint=(170, 255, 150)),
     3: dict(name="lust", style="lust", ambient=(88, 52, 78), gem=(255, 105, 170), bar=(255, 105, 170),
             brazier=(255, 90, 170), flame=(255, 60, 150), flame_core=(255, 215, 235),
             inlay=((110, 20, 60), (255, 170, 200)), decor=("petal_decor", "heart_decor"), emblem_alpha=90,
@@ -316,5 +333,5 @@ THEMES = {
                    "brazier": (255, 190, 230), "gate_closed": (255, 190, 225), "gate_open": (255, 190, 225),
                    "guardian_sentinel": (255, 175, 205), "guardian_skirmisher": (255, 160, 195),
                    "guardian_lancer": (235, 175, 255), "guardian_elite": (255, 130, 170)},
-            swarmer_tint=(255, 200, 235), bulwark_tint=(235, 170, 255)),
+            swarmer_tint=(255, 200, 235), bulwark_tint=(235, 170, 255), boss_tint=(255, 120, 190)),
 }

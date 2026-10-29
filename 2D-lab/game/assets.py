@@ -79,6 +79,7 @@ class Assets:
         img["guardian_bulwark"] = variant(img["guardian_sentinel"], 1.45, theme.get("bulwark_tint", (255, 205, 150)))
         img["guardian_bomber"] = variant(raw["guardian_sentinel"], 0.9, (255, 120, 80))
         img["guardian_banker"] = variant(raw["guardian_lancer"], 1.05, (255, 222, 110))
+        img["guardian_boss"] = variant(img["guardian_elite"], 1.8, theme.get("boss_tint", (255, 232, 150)))
         img["guardian_charmer"] = variant(raw["guardian_sentinel"], 1.15, (255, 110, 210))
         img["guardian_cupid"] = variant(raw["guardian_skirmisher"], 1.0, (255, 215, 235))
 
@@ -278,7 +279,7 @@ class Assets:
     def prewarm(self):
         """Build every rotation cache up front so no frame hitches mid-game."""
         for n in ("hero", "guardian_sentinel", "guardian_skirmisher", "guardian_lancer", "guardian_elite",
-                  "guardian_swarmer", "guardian_bulwark", "guardian_bomber", "guardian_banker", "guardian_charmer", "guardian_cupid",
+                  "guardian_swarmer", "guardian_bulwark", "guardian_bomber", "guardian_banker", "guardian_charmer", "guardian_cupid", "guardian_boss",
                   "ferryman", "chakram"):
             self.rotations(n)
         for n in ("needle", "spear", "pellet"):

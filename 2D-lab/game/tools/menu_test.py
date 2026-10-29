@@ -37,6 +37,17 @@ def calm(g):
     g.player.hp = g.player.max_hp
 
 
+def open_gate(g):
+    """Fill the bar and kill the boss the final wave brings: that is what opens the gate."""
+    g.add_pride(g.cfg.pride_max)
+    g.queue.clear()
+    g.update(dt, (0, 0))
+    boss = next((e for e in g.enemies if e.kind == "boss"), None)
+    if boss is not None:
+        g.damage_enemy(boss, 1e9, 0, 0)
+    g.update(dt, (0, 0))
+
+
 def foe(kind, dx, dy, hp=None):
     e = Enemy(kind, g.player.x + dx, g.player.y + dy)
     e.spawn_t = 0
@@ -216,7 +227,14 @@ n_before = len(g.enemies)
 g.add_pride(S.PRIDE_MAX)
 g.queue.clear()       # a jump straight to a full bar would queue every weapon menu
 g.update(dt, (0, 0))
-check("full bar opens the gate", g.exit_open and g.level.gate_open)
+g.update(dt, (0, 0))
+boss = next((e for e in g.enemies if e.kind == "boss"), None)
+check("the final wave brings the level boss", boss is not None and boss.max_hp == S.BOSS1["hp"])
+check("a full bar does NOT open the gate while the boss lives", not g.exit_open and g.hold_exit)
+g.damage_enemy(boss, 1e9, 0, 0)
+g.update(dt, (0, 0))
+check("killing the boss opens the gate", g.exit_open and g.level.gate_open and not g.hold_exit)
+n_before = len(g.enemies)
 check("guardians stay when the gate opens", len(g.enemies) >= n_before - 1 and len(g.enemies) > 0)
 for _ in range(120):
     g.update(dt, (0, 0))
@@ -344,10 +362,8 @@ g.handle_key(K.K_1)
 # the whole level 2 flow: win -> run restarts at level 1; lose -> retry level 2
 g.begin_level(2, dict(S.DEMO_CARRY))
 g.player.invuln = 999
-g.add_pride(g.cfg.pride_max)
-g.queue.clear()
-g.update(dt, (0, 0))
-check("full bar opens the gate in Level 2 too", g.exit_open and g.level.gate_open)
+open_gate(g)
+check("full bar plus a dead boss opens the gate in Level 2 too", g.exit_open and g.level.gate_open)
 g.player.x, g.player.y = (S.GATE_X0 + S.GATE_X1) / 2, 60
 for _ in range(90):
     g.update(dt, (0, -1))
@@ -364,10 +380,8 @@ check("Level 3 is tougher than Level 2: health, speed, numbers, spawn rate",
       and S.LEVELS[3].stages[6]["cap"] > S.LEVELS[2].stages[6]["cap"]
       and S.LEVELS[3].stages[6]["interval"] < S.LEVELS[2].stages[6]["interval"]
       and S.LEVELS[3].stages[1]["cap"] > S.LEVELS[2].stages[1]["cap"])
-g.add_pride(g.cfg.pride_max)
-g.queue.clear()
 g.player.invuln = 999
-g.update(dt, (0, 0))
+open_gate(g)
 g.player.x, g.player.y = (S.GATE_X0 + S.GATE_X1) / 2, 60
 for _ in range(90):
     g.update(dt, (0, -1))
@@ -468,6 +482,80 @@ check("charmers stay within their cap", sum(1 for e in g.enemies if e.kind == "c
 check("ranged guardians stay within the cap", sum(1 for e in g.enemies if e.kind in S.RANGED_KINDS) <= g.cfg.lancer_cap)
 g.start()
 
+# ---- bosses --------------------------------------------------------------------------------------
+from entities import Boss  # noqa: E402
+
+for lvl in (1, 2, 3):
+    spec = S.LEVELS[lvl].boss
+    check(f"level {lvl} has a boss with several attacks", spec is not None and len(spec["moves"]) >= 5)
+    for mv in spec["moves"]:
+        g.begin_level(lvl, dict(S.DEMO_CARRY_LATE))
+        g.enemies.clear()
+        g.player.weapons = {}
+        g.player.invuln = 999
+        g.spawn_t = 999
+        b = Boss(g.player.x + 350, g.player.y, spec)
+        b.spawn_t = 0
+        b.hp = b.max_hp * 0.4                # enraged, to exercise the stronger variants too
+        g.enemies.append(b)
+        b.act, b.act_t, b.fired, b.last = mv, 0.0, 0, mv
+        made = 0
+        for _ in range(420):
+            g.update(dt, (0, 0))
+            g.player.invuln = 999
+            g.player.hp = g.player.max_hp
+            made = max(made, len(g.spears) + len(g.hazards) + len(g.enemies) - 1 + (1 if b.charm_t > 0 else 0)
+                       + (1 if b.charge_t > 0 or (mv == "charge" and b.act_t > 0.8) else 0))
+            if b.act is None and made:
+                break
+        check(f"level {lvl} boss attack '{mv}' fires and finishes", made > 0 and b.act is None)
+    g.begin_level(lvl, dict(S.DEMO_CARRY_LATE))
+    check(f"level {lvl} boss attacks are themed ({S.LEVELS[lvl].boss['zone']} blasts)", S.LEVELS[lvl].boss["zone"] == ("light", "gold", "rose")[lvl - 1])
+check("the lust boss uses charm and homing hearts, the greed boss coin storms and bombers",
+      "charm" in S.BOSS3["moves"] and S.BOSS3["ring_homing"] and "spiral" in S.BOSS2["moves"]
+      and any(k == "bomber" for k, _ in S.BOSS2["summon"]))
+# a ground blast hurts only when you stay inside
+g.begin_level(1)
+g.enemies.clear()
+g.spawn_t = 999
+g.player.invuln = 0
+g.spawn_hazard(g.player.x, g.player.y, 100, 0.3, "light")
+hp0 = g.player.hp
+for _ in range(30):
+    g.update(dt, (0, 0))
+check("standing in a boss ground blast costs a heart", g.player.hp == hp0 - 1)
+g.player.invuln = 0
+hp0 = g.player.hp
+g.spawn_hazard(g.player.x + 400, g.player.y, 100, 0.3, "gold")
+for _ in range(30):
+    g.update(dt, (0, 0))
+check("a blast that lands elsewhere does nothing", g.player.hp == hp0)
+
+# ---- melee guardians never back away -------------------------------------------------------------------
+g.begin_level(1)
+calm(g)
+g.player.weapons = {}
+g.player.invuln = 999
+worst = 0.0
+for kind in ("sentinel", "swarmer", "bulwark", "skirmisher"):
+    for dx, side in ((220, 1), (-220, -1)):
+        calm(g)
+        g.player.x, g.player.y = S.PLAYER_START
+        e = foe(kind, dx, 0, 999)
+        e.flank = 0.6 * side
+        e.cd = 999                                   # no lunge: plain approach
+        for _ in range(240):
+            before = (e.x - g.player.x) ** 2 + (e.y - g.player.y) ** 2
+            g.update(dt, (float(side), 0))         # the hero runs straight at the guardian
+            g.player.invuln = 999
+            after = (e.x - g.player.x) ** 2 + (e.y - g.player.y) ** 2
+            if after ** 0.5 < 90:
+                break
+            vx, vy = e.vx, e.vy
+            toward = ((g.player.x - e.x) * vx + (g.player.y - e.y) * vy) / (after ** 0.5 or 1)
+            worst = min(worst, toward)
+check("a melee guardian never moves away from a hero charging at it", worst > -1.0)
+
 # ---- death ------------------------------------------------------------------------------------
 g.reset()
 g.state = "play"
@@ -491,10 +579,15 @@ for lang in ("mk", "en"):
     g.update(dt, (0, 0))
     g.draw(screen)
     for lvl in (1, 2, 3):
+        boss_here = Boss(g.player.x + 300, g.player.y - 100, S.LEVELS[lvl].boss)
         g.begin_level(lvl, None if lvl == 1 else dict(S.DEMO_CARRY_LATE if lvl == 3 else S.DEMO_CARRY))
         g.enemies = [Enemy(k, g.player.x + 100 + i * 50, g.player.y + 60) for i, k in enumerate(S.ENEMIES)]
-        g.enemies[-1].windup = g.enemies[-1].windup_max = 0.5
-        g.enemies[-2].charm_t = 0.5
+        boss_here.spawn_t = 0
+        boss_here.act, boss_here.tele = "ring", 0.6
+        g.enemies.append(boss_here)
+        g.spawn_hazard(g.player.x + 200, g.player.y, 110, 1.0, S.LEVELS[lvl].boss["zone"])
+        g.enemies[-2].windup = g.enemies[-1].windup_max = 0.5
+        g.enemies[-3].charm_t = 0.5
         g.update(dt, (0, 0))
         g.draw(screen)
         for kind in ("weapon", "stat"):

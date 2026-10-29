@@ -84,6 +84,11 @@ TEXT = {
         "victory_sub3": "Три греха зад тебе. Остануваат уште четири...",
         "again3": "ENTER: играј од почеток     ESC: излез",
         "f3_hint": "[F3] Ниво 3 со јака опрема",
+        "boss_name": "Крунисаниот Чувар",
+        "boss_name2": "Главниот Банкар",
+        "boss_name3": "Госпоѓата на Желбата",
+        "boss_banner": "БОС",
+        "boss_hint": "Победи го босот за да се отвори портата!",
         "ferryman_line": "„Секој грев има цена. Избери што ќе понесеш.“",
     },
     "en": {
@@ -167,6 +172,11 @@ TEXT = {
         "victory_sub3": "Three sins behind you. Four remain...",
         "again3": "ENTER: play again from the start     ESC: quit",
         "f3_hint": "[F3] Level 3 with a strong loadout",
+        "boss_name": "The Crowned Guardian",
+        "boss_name2": "The Chief Banker",
+        "boss_name3": "The Mistress of Desire",
+        "boss_banner": "BOSS",
+        "boss_hint": "Defeat the boss to open the gate!",
         "ferryman_line": "\"Every sin has a price. Choose what you carry.\"",
     },
 }

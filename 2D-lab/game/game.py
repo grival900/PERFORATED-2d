@@ -8,13 +8,14 @@ import settings as S
 import strings
 import weapons as W
 from assets import Assets
-from entities import Box, Enemy, Gem, HeartPickup, Player, Shot, Spear
+from entities import Boss, Box, Enemy, Gem, Hazard, HeartPickup, Player, Shot, Spear
 from fx import Particles
 from level import Level
 from strings import t, tl
 from ui import UI
 
 UPGRADE_IDS = ["multi", "rate", "pierce", "power", "area", "dash", "speed", "heart"]
+HAZARD_COLORS = {"light": (255, 225, 120), "gold": (255, 205, 60), "rose": (255, 90, 160)}
 AREA_WEAPONS = ("halo", "pulse", "arc", "mine", "chakram")
 
 
@@ -94,6 +95,9 @@ class Game:
         self.player.weapons = {w: W.WEAPONS[w]() for w in names}
         self.enemies, self.shots, self.spears = [], [], []
         self.mines, self.chakrams, self.bolts, self.waves = [], [], [], []
+        self.hazards = []                # telegraphed ground blasts (boss)
+        self.boss_due = False            # the final wave has begun and the boss has not arrived yet
+        self.hold_exit = False           # the bar is full but the boss still lives
         self.grid = {}
         self.pickups = [HeartPickup(x, y) for x, y in S.HEART_SPOTS]
         self.fx.items.clear()
@@ -266,6 +270,7 @@ class Game:
         W.update_mines(self, dt)
         W.update_chakrams(self, dt)
         W.update_bolts(self, dt)
+        self.update_hazards(dt)
         self.enemies = [e for e in self.enemies if e.hp > 0]
 
         self.update_director(dt)
@@ -376,14 +381,24 @@ class Game:
         if award:
             self.kills += 1
             self.assets.play("kill", 0.04)
-            if not self.exit_open:           # the bar is full: guardians stay, but are worth nothing
+            if not self.exit_open and e.pts:    # the bar is full: guardians stay, but are worth nothing
                 self.fx.text(e.x, e.y - 20, f"+{e.pts}", (255, 232, 150), 34 if e.kind == "elite" else 22)
                 self.add_pride(e.pts)
+            if e.kind == "boss":
+                self.fx.diamonds(e.x, e.y, 40, 600, 1.4)
+                self.fx.ring(e.x, e.y, e.spec["color"], 420, 0.9, 12)
+                self.shake = max(self.shake, 1.0)
+                self.assets.play("slam")
+                for dx, dy in ((-60, 0), (60, 0)):
+                    self.pickups.append(HeartPickup(e.x + dx, e.y + dy, respawns=False))
+                self.spears.clear()
             if e.kind == "elite":
                 self.pickups.append(HeartPickup(e.x, e.y, respawns=False))
                 self.shake = max(self.shake, 0.6)
                 self.assets.play("slam")
         e.hp = 0
+        if e.kind == "boss" and self.hold_exit:
+            self.try_open_exit()
 
     def dash_hits(self):
         p = self.player
@@ -405,6 +420,36 @@ class Game:
         if p.invuln <= 0 and math.hypot(p.x - e.x, p.y - e.y) < S.BOMBER_BLAST + p.r * 0.5:
             self.hurt_player(p.x - e.x, p.y - e.y)
         e.hp = 0
+
+    def spawn_hazard(self, x, y, r, dur, style):
+        x = min(S.ARENA - 40, max(40, x))
+        y = min(S.ARENA - 40, max(40, y))
+        self.hazards.append(Hazard(x, y, r, dur, style))
+
+    def update_hazards(self, dt):
+        p = self.player
+        keep = []
+        for h in self.hazards:
+            h.t += dt
+            if h.t < h.dur:
+                keep.append(h)
+                continue
+            col = HAZARD_COLORS[h.style]                # the blast, themed by the sin
+            self.fx.ring(h.x, h.y, col, h.r * 1.2, 0.4, 9)
+            if h.style == "light":
+                self.fx.diamonds(h.x, h.y, 10, 380, 0.7)
+                self.fx.burst(h.x, h.y, (255, 245, 200), 14, 360, 0.5, 10)
+            elif h.style == "gold":
+                self.fx.diamonds(h.x, h.y, 14, 420, 0.8)
+                self.fx.burst(h.x, h.y, (255, 200, 40), 18, 340, 0.55, 10)
+            else:
+                self.fx.burst(h.x, h.y, (255, 90, 160), 20, 340, 0.6, 11)
+                self.fx.burst(h.x, h.y, (255, 200, 225), 8, 240, 0.5, 8)
+            self.assets.play("mine", 0.05)
+            self.shake = max(self.shake, 0.15)
+            if p.invuln <= 0 and math.hypot(p.x - h.x, p.y - h.y) < h.r + p.r * 0.4:
+                self.hurt_player(p.x - h.x, p.y - h.y)
+        self.hazards = keep
 
     def spawn_spear(self, x, y, ux, uy, homing=False):
         self.spears.append(Spear(x, y, ux, uy, homing))
@@ -473,6 +518,7 @@ class Game:
             self.enemies.clear()
             self.spears.clear()
             self.shots.clear()
+            self.hazards.clear()
             self.mines.clear()
             self.chakrams.clear()
             self.bolts.clear()
@@ -495,10 +541,10 @@ class Game:
                             d = math.sqrt(d2)
                             push = (rr - d) * 0.5
                             ux, uy = dx / d, dy / d
-                            if e.kind != "elite":
+                            if e.kind not in ("elite", "boss"):
                                 e.x -= ux * push
                                 e.y -= uy * push
-                            if o.kind != "elite":
+                            if o.kind not in ("elite", "boss"):
                                 o.x += ux * push
                                 o.y += uy * push
             dx, dy = e.x - p.x, e.y - p.y
@@ -522,9 +568,24 @@ class Game:
             self.enemy_speed_mult = cfg.stage_speed[self.stage] * cfg.speed_mult
             self.pending_elites += cfg.elites.get(self.stage, 0)
             self.queue.append("weapon")               # every wave unlocks a weapon (a free upgrade once all are owned)
+            if self.stage == cfg.num_stages and cfg.boss:
+                self.boss_due = True                  # the final wave brings the level boss
             self.show_banner(t("stage").format(n=self.stage) + ": " + tl("stage_desc", self.level_no)[self.stage])
         if self.pride >= cfg.pride_max:
-            self.open_exit()
+            self.try_open_exit()
+
+    def boss_alive(self):
+        return any(e.kind == "boss" and e.hp > 0 for e in self.enemies)
+
+    def try_open_exit(self):
+        """The gate opens when the bar is full AND the boss (if the level has one) is dead."""
+        if self.exit_open:
+            return
+        if self.boss_due or self.boss_alive():
+            self.hold_exit = True
+            return
+        self.hold_exit = False
+        self.open_exit()
 
     def open_exit(self):
         """The bar is full: the gate opens. The guardians that are out there stay."""
@@ -770,7 +831,7 @@ class Game:
         p = self.player
         lim = S.RECYCLE_DISTANCE ** 2
         for e in self.enemies:
-            if (e.x - p.x) ** 2 + (e.y - p.y) ** 2 > lim and e.charge_t <= 0:
+            if (e.x - p.x) ** 2 + (e.y - p.y) ** 2 > lim and e.charge_t <= 0 and e.kind != "boss":
                 e.x, e.y = self.spawn_center()
                 e.spawn_t = 0.35
 
@@ -792,11 +853,20 @@ class Game:
                 self.spawn_enemy("elite", x, y)
                 self.assets.play("elite")
                 self.fx.ring(x, y, (255, 220, 120), 220, 0.8, 6)
+        if self.boss_due:                                   # the level boss arrives with the final wave
+            self.boss_due = False
+            x, y = self.spawn_center()
+            self.enemies.append(Boss(x, y, self.cfg.boss))
+            self.assets.play("elite")
+            self.fx.ring(x, y, self.cfg.boss["color"], 320, 1.0, 10)
+            self.shake = max(self.shake, 0.6)
+            self.show_banner(t("boss_banner") + ": " + tl("boss_name", self.level_no))
         self.spawn_t -= dt
         if self.spawn_t > 0:
             return
         self.spawn_t = st["interval"] * random.uniform(0.85, 1.15)
-        room = min(st["cap"], S.MAX_ENEMIES) - len(self.enemies)
+        cap = min(st["cap"], S.MAX_ENEMIES) * (S.BOSS_CAP_FACTOR if self.boss_alive() else 1.0)
+        room = int(cap) - len(self.enemies)
         if room <= 0:
             return
         if random.random() < st["swarm"]:                  # a pack of fast swarmers
@@ -898,6 +968,14 @@ class Game:
                 pulse = 0.5 + 0.5 * math.sin(t_now * (9 if armed else 20))
                 g = a.glow(20 + 6 * pulse, (150, 90, 20) if armed else (80, 80, 80))
                 screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
+        for h in self.hazards:
+            if self.on_screen(h.x, h.y, h.r + 20, cam):
+                k, r, col = h.t / h.dur, int(h.r), HAZARD_COLORS[h.style]
+                tmp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+                pygame.draw.circle(tmp, (*col, int(30 + 60 * k)), (r, r), r)
+                pygame.draw.circle(tmp, (*col, int(60 + 80 * k)), (r, r), max(2, int(r * k)))
+                pygame.draw.circle(tmp, (*col, 230), (r, r), r, 4)
+                screen.blit(tmp, (h.x - cam[0] - r, h.y - cam[1] - r))
         for gm in self.gems:
             if self.on_screen(gm.x, gm.y, 40, cam):
                 sx, sy = gm.x - cam[0], gm.y - cam[1] + math.sin(t_now * 5 + gm.t) * 3
@@ -981,6 +1059,9 @@ class Game:
         n = 0
         for e in self.enemies:
             if -200 < e.x - cam[0] < W_ + 200 and -200 < e.y - cam[1] < H + 200:
+                if e.kind == "boss":
+                    lights.append((e.x, e.y, 330, tuple(int(c * 0.6) for c in e.spec["color"])))
+                    continue
                 lights.append((e.x, e.y, 84 if e.kind != "elite" else 190, (150, 140, 110)))
                 n += 1
                 if n > 45:
@@ -1018,7 +1099,7 @@ class Game:
     def draw_enemy(self, screen, cam, e, t_now):
         a = self.assets
         sx, sy = e.x - cam[0], e.y - cam[1]
-        if sx < -220 or sx > S.SCREEN_W + 220 or sy < -220 or sy > S.SCREEN_H + 220:
+        if sx < -340 or sx > S.SCREEN_W + 340 or sy < -340 or sy > S.SCREEN_H + 340:
             return
         screen.blit(self.shadow(e.shadow), self.shadow(e.shadow).get_rect(center=(sx, sy + e.r * 0.55)))
         img = a.rotated(e.sprite, e.face)
@@ -1036,8 +1117,8 @@ class Game:
             img.set_alpha(int(255 * k))
         bob = math.sin(e.t * 3) * 2
         screen.blit(img, img.get_rect(center=(sx, sy + bob)))
-        n = {"sentinel": 3, "skirmisher": 0, "lancer": 2, "elite": 5, "swarmer": 0, "bulwark": 4, "bomber": 0, "banker": 2, "charmer": 3, "cupid": 0}[e.kind]
-        rad = e.r + 18 + (6 if e.kind == "elite" else 0)
+        n = {"sentinel": 3, "skirmisher": 0, "lancer": 2, "elite": 5, "swarmer": 0, "bulwark": 4, "bomber": 0, "banker": 2, "charmer": 3, "cupid": 0, "boss": 7}[e.kind]
+        rad = e.r + 18 + (6 if e.kind in ("elite", "boss") else 0)
         shard = a.img["shard"]
         for i in range(n):
             ang = e.t * 1.6 + i * math.tau / n
@@ -1069,6 +1150,20 @@ class Game:
                 pygame.draw.line(screen, (255, 200, 225), (x0, y0), (x1, y1), 1)
                 g = a.glow(46, (150, 30, 90))
                 screen.blit(g, g.get_rect(center=(x1, y1)), special_flags=pygame.BLEND_RGB_ADD)
+        for e in self.enemies:                                   # boss wind-ups, in the boss's own colour
+            if e.kind != "boss" or not e.act:
+                continue
+            a = self.assets
+            sx, sy = e.x - cam[0], e.y - cam[1]
+            col, k = e.spec["color"], e.tele
+            if e.act in ("fan", "charge"):
+                if k < 1.0:
+                    ln = 760 if e.act == "fan" else 600
+                    pygame.draw.line(screen, col, (sx, sy), (sx + e.aim[0] * ln, sy + e.aim[1] * ln), 3 if e.act == "fan" else 6)
+            else:
+                g = a.glow(70 + 190 * k, tuple(int(c * 0.45) for c in col))
+                screen.blit(g, g.get_rect(center=(sx, sy)), special_flags=pygame.BLEND_RGB_ADD)
+                pygame.draw.circle(screen, col, (int(sx), int(sy)), int(e.r + 20 + 110 * k), 3)
         for e in self.enemies:
             if e.windup <= 0:
                 continue

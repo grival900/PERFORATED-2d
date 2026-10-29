@@ -159,7 +159,9 @@ class UI:
         for b in g.boxes:
             pygame.draw.rect(screen, (255, 220, 110) if b.gilded else (80, 230, 205), (*pt(b.x, b.y), 3, 3))
         for e in g.enemies:
-            pygame.draw.rect(screen, (235, 70, 80) if e.kind != "elite" else (255, 150, 60), (*pt(e.x, e.y), 2, 2))
+            big = e.kind == "boss"
+            pygame.draw.rect(screen, (255, 80, 220) if big else (235, 70, 80) if e.kind != "elite" else (255, 150, 60),
+                             (*pt(e.x, e.y), 6 if big else 2, 6 if big else 2))
         gx, gy = pt((S.GATE_X0 + S.GATE_X1) / 2, 0)
         pygame.draw.rect(screen, (255, 232, 140) if g.exit_open else (150, 120, 60), (gx - 6, gy, 12, 4))
         px, py = pt(g.player.x, g.player.y)
@@ -169,8 +171,25 @@ class UI:
         vx, vy = pt(g.cam[0], g.cam[1])
         pygame.draw.rect(screen, (200, 200, 230), (vx, vy, int(S.SCREEN_W * k), int(S.SCREEN_H * k)), 1)
 
+    def draw_boss_bar(self, screen, g):
+        boss = next((e for e in g.enemies if e.kind == "boss" and e.hp > 0 and e.spawn_t <= 0.6), None)
+        if boss is None:
+            return
+        w, h = 640, 20
+        x, y = (S.SCREEN_W - w) // 2, 188
+        col = boss.spec["color"]
+        panel(screen, pygame.Rect(x - 8, y - 8, w + 16, h + 16), (8, 8, 18), 210, 10, col, 3)
+        pygame.draw.rect(screen, (30, 14, 20), (x, y, w, h), border_radius=5)
+        fw = int(w * max(0.0, boss.hp) / boss.max_hp)
+        pygame.draw.rect(screen, col, (x, y, fw, h), border_radius=5)
+        pygame.draw.rect(screen, (255, 255, 255), (x, y, fw, h // 3), border_radius=5)
+        if boss.enraged:
+            pygame.draw.rect(screen, (255, 70, 70), (x, y, w, h), 3, border_radius=5)
+        text(screen, self.a, tl("boss_name", g.level_no), 20, (S.SCREEN_W // 2, y - 12), col, "midbottom")
+
     def draw_hud(self, screen, g):
         a = self.a
+        self.draw_boss_bar(screen, g)
         self.draw_pride_bar(screen, g)
         self.draw_offerings_bar(screen, g)
         self.draw_hearts(screen, g)
@@ -183,14 +202,17 @@ class UI:
         if g.banner_t > 0:
             k = min(1.0, g.banner_t / 0.5, (2.8 - g.banner_t) / 0.4 if g.banner_t > 2.4 else 1.0)
             alpha = int(255 * max(0.0, min(1.0, k)))
-            text(screen, a, g.banner_text, 32, (S.SCREEN_W // 2, 200), GOLD, "center", alpha=alpha)
+            text(screen, a, g.banner_text, 32, (S.SCREEN_W // 2, 262), GOLD, "center", alpha=alpha)
         if g.time < 18 and g.box_total == 0 and g.banner_t <= 0:
-            text(screen, a, tl("hint_boxes", g.level_no), 24, (S.SCREEN_W // 2, 200), (170, 245, 230), "center",
+            text(screen, a, tl("hint_boxes", g.level_no), 24, (S.SCREEN_W // 2, 262), (170, 245, 230), "center",
                  alpha=int(255 * (0.6 + 0.4 * math.sin(g.time * 4))))
+        if g.hold_exit and not g.exit_open and not g.over:
+            pulse = 0.6 + 0.4 * math.sin(g.time * 5)
+            text(screen, a, t("boss_hint"), 24, (S.SCREEN_W // 2, 300), (255, 190, 150), "center", alpha=int(255 * pulse))
         # exit hint
         if g.exit_open and not g.over:
             pulse = 0.6 + 0.4 * math.sin(g.time * 5)
-            text(screen, a, t("exit_open"), 26, (S.SCREEN_W // 2, 240), (255, 236, 160), "center",
+            text(screen, a, t("exit_open"), 26, (S.SCREEN_W // 2, 300), (255, 236, 160), "center",
                  alpha=int(255 * pulse))
             gx = (S.GATE_X0 + S.GATE_X1) / 2 - g.cam[0]
             gy = 0 - g.cam[1]
