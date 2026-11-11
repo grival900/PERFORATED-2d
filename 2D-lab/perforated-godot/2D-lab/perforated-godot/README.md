@@ -10,6 +10,8 @@ A Godot 4 (GDScript, 2D) port of the pygame prototype in `../game`. Same arena, 
 
 Main scene: `scenes/main.tscn`. The arena (`LevelView`, a `@tool` script), the north gate and the three mini-boss doors are real nodes, so the map shows in the 2D editor without pressing Play (press **F** in the 2D view to frame it, or zoom out). Enemies, lights, effects and the HUD are created by `scripts/game.gd` at runtime.
 
+See `REQUIREMENTS.md` for which file / node implements each course requirement (camera + limits, animation, enemy, lives + restart, bonus).
+
 ### Editing the map in the editor
 
 Everything in the main arena that is level design is a node in `scenes/main.tscn`:
@@ -20,6 +22,11 @@ Everything in the main arena that is level design is a node in `scenes/main.tscn
 - `Ferryman`: where the Ferryman stands (placeholder sprite, hidden in the game; the game draws him so he can turn towards you). His lantern light follows this node.
 - `Altar`: the altar sprite and its teal light.
 - `Gate`, `DoorSouth`, `DoorEast`, `DoorWest`: the exit gate and the three mini-boss doors.
+- `Camera2D`: follows the hero; its Limit properties keep the view inside the level.
+- `Hero`: Body sprite, AnimationPlayer (idle, run, turn, dash, hurt, die) and a Hurtbox Area2D.
+- `Sentries/Sentry01..02`: enemies that patrol their `Waypoints` (Marker2D); touching one is deadly, shooting or dashing through it kills it.
+- `Hazards/Hazard01..04`: lethal zones (Area2D). Touching one kills the hero and the level restarts.
+- `Braziers`, `HeartSpots`, `SpawnPoints`: positions of the braziers, the heart pickups and the guardian spawn points.
 
 Duplicate a pillar or wall (Ctrl+D) to add more; the game picks up every node in those groups, and the minimap follows. The three mini-boss rooms' own pillars and the braziers are still data in `scripts/rooms.gd` and `scripts/cfg.gd`.
 `python 2D-lab/tools/make_godot_scene.py` rewrites `main.tscn` from the original layout, which discards your editor changes.

@@ -60,6 +60,8 @@ const TEXT: Dictionary = {
 		"legend": "врата со мини-бос",
 		"names": ["Чуварот на јужната порта", "Копјаникот од исток", "Господарот на запад"],
 		"to_portal": "Влези во порталот за да се вратиш",
+		"restart": "Умре! Нивото се рестартира",
+		"deaths": "Умирања",
 	},
 	"en": {
 		"door_open": "A door to a mini-boss opened!",
@@ -70,6 +72,8 @@ const TEXT: Dictionary = {
 		"legend": "mini-boss door",
 		"names": ["Warden of the south gate", "Spear Master of the east", "Lord of the west"],
 		"to_portal": "Step into the portal to return",
+		"restart": "You died! The level restarts",
+		"deaths": "Deaths",
 	},
 }
 

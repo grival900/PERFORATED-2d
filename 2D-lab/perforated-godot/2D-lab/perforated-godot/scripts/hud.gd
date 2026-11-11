@@ -109,6 +109,7 @@ func _draw_hud() -> void:
 	var secs: int = int(g.time) % 60
 	txt("%s: %d" % [g.T("kills"), g.kills], Cfg.SCREEN_W - 24.0, 30.0, 18, WHITE, "right")
 	txt("%d:%02d" % [mins, secs], Cfg.SCREEN_W - 24.0, 56.0, 18, DIM, "right")
+	txt("%s: %d" % [Rooms.t(g.lang, "deaths"), g.deaths], Cfg.SCREEN_W - 24.0, 80.0, 16, DIM, "right")
 	if g.time < 25.0 and g.box_total == 0 and g.state == "play":
 		txt(g.T("hint_boxes"), Cfg.SCREEN_W / 2.0, Cfg.SCREEN_H - 40.0, 20, Color(0.7, 0.95, 0.9, 0.85))
 	if g.banner_t > 0.0:
@@ -301,6 +302,11 @@ func _minimap_main(x0: float, y0: float, size: float) -> void:
 	for w in g.arena.low_wall_rects:
 		var r2 := Rect2(o + w.position * s, (w.size * s).max(Vector2(2.0, 2.0)))
 		draw_rect(r2, Color(0.42, 0.39, 0.6))
+	for hz in g.arena.hazard_rects:
+		draw_rect(Rect2(o + hz.position * s, hz.size * s), Color(0.8, 0.1, 0.2, 0.85))
+	for sn in g.sentries:
+		if sn.alive:
+			draw_circle(o + sn.global_position * s, 3.0, Color8(255, 150, 60))
 	for hh in g.hearts:
 		if hh.alive:
 			draw_circle(o + Vector2(hh.x, hh.y) * s, 2.0, Color8(255, 90, 110))

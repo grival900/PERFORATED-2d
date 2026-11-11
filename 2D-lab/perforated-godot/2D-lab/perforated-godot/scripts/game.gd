@@ -104,6 +104,12 @@ var last_move: Vector2 = Vector2.ZERO
 var player_start: Vector2 = Cfg.PLAYER_START
 var ferry_pos: Vector2 = Vector2(Cfg.ALTAR_POS.x - 70.0, Cfg.ALTAR_POS.y + 12.0)
 var altar_pos: Vector2 = Cfg.ALTAR_POS
+var hero                          # the Hero node: Body sprite + AnimationPlayer + Hurtbox (Area2D)
+var sentries: Array = []          # the Sentry nodes: enemies that patrol a path
+var deaths: int = 0
+var brazier_positions: Array = []
+var heart_spots: Array = []
+var spawn_pts: Array = []
 # mini-boss rooms
 var room: int = 0                  # 0 = main arena, 1..3 = mini-boss rooms
 var rooms_done: Array = [false, false, false]
@@ -125,6 +131,8 @@ func _ready() -> void:
 	_new_run()
 	state = "title"
 	cam_pos = Vector2(Cfg.ARENA / 2.0 - Cfg.SCREEN_W / 2.0, player_start.y - Cfg.SCREEN_H / 2.0 - 120.0)
+	camera.position = Vector2(Cfg.ARENA / 2.0, player_start.y - 120.0)
+	camera.reset_smoothing()
 
 
 func _read_markers() -> void:
@@ -141,7 +149,26 @@ func _read_markers() -> void:
 	n = get_node_or_null("Altar")
 	if n != null:
 		altar_pos = n.position
+	hero = get_node_or_null("Hero")
+	sentries = get_tree().get_nodes_in_group("sentry")
+	brazier_positions = []
+	for b in get_tree().get_nodes_in_group("brazier"):
+		brazier_positions.append(b.position)
+	if brazier_positions.is_empty():
+		brazier_positions = Cfg.BRAZIERS.duplicate()
+	heart_spots = []
+	for h in get_tree().get_nodes_in_group("heart_spot"):
+		heart_spots.append(h.position)
+		h.visible = false   # editor placeholder; the game draws the hearts itself
+	if heart_spots.is_empty():
+		heart_spots = Cfg.HEART_SPOTS.duplicate()
+	spawn_pts = []
+	for sp in get_tree().get_nodes_in_group("spawn_point"):
+		spawn_pts.append(sp.position)
+	if spawn_pts.is_empty():
+		spawn_pts = Cfg.SPAWN_POINTS.duplicate()
 	arena.altar_pos = altar_pos
+	arena.braziers = brazier_positions
 
 
 func _load_assets() -> void:
@@ -208,11 +235,11 @@ func _build_nodes() -> void:
 	gate_sprite.position = Vector2((Cfg.GATE_X0 + Cfg.GATE_X1) / 2.0, 20.0 - 85.0)
 	gate_sprite.z_index = -5
 
-	for b in Cfg.BRAZIERS:
+	for b in brazier_positions:
 		brazier_lights.append(_add_light(b, 330.0, Color8(255, 168, 78), 1.0))
 	_add_light(altar_pos, 260.0, Color8(60, 235, 215), 1.0)
 	_add_light(ferry_pos + Vector2(0, -32), 120.0, Color8(60, 235, 215), 1.0)
-	for h in Cfg.HEART_SPOTS:
+	for h in heart_spots:
 		_add_light(h, 110.0, Color8(255, 90, 110), 0.8)
 	gate_light = _add_light(Vector2((Cfg.GATE_X0 + Cfg.GATE_X1) / 2.0, 30.0), 240.0, Color8(214, 168, 86), 1.0)
 	player_light = _add_light(Vector2.ZERO, 430.0, Color8(235, 230, 250), 1.0)
@@ -239,9 +266,14 @@ func _build_nodes() -> void:
 		for b in rd["braziers"]:
 			brazier_lights.append(_add_light(b, 330.0, Color8(255, 168, 78), 1.0))
 
-	camera = Camera2D.new()
-	camera.anchor_mode = Camera2D.ANCHOR_MODE_FIXED_TOP_LEFT
-	add_child(camera)
+	# the Camera2D is a node of main.tscn (with its Limit properties); it follows the hero and is smoothed
+	camera = get_node_or_null("Camera2D") as Camera2D
+	if camera == null:
+		camera = Camera2D.new()
+		add_child(camera)
+	camera.position_smoothing_enabled = true
+	camera.position_smoothing_speed = 9.0
+	_apply_camera_limits()
 	camera.make_current()
 
 	# glow / particle layers follow the camera but are not tinted by the ambient light
@@ -329,7 +361,7 @@ func _new_run() -> void:
 	parts = []
 	grid = {}
 	hearts = []
-	for h in Cfg.HEART_SPOTS:
+	for h in heart_spots:
 		hearts.append(Ent.HeartPickup.new(h.x, h.y, true))
 	time = 0.0
 	kills = 0
@@ -364,10 +396,17 @@ func _new_run() -> void:
 	enemy_speed_mult = float(Cfg.STAGE_SPEED[1])
 	ghost_t = 0.0
 	cam_pos = Vector2(player_start.x - Cfg.SCREEN_W / 2.0, player_start.y - Cfg.SCREEN_H / 2.0)
+	_apply_camera_limits()
+	camera.position = Vector2(player_start.x, player_start.y)
+	camera.reset_smoothing()
+	get_tree().call_group("resettable", "reset")   # sentries (and anything else resettable) back to their start
+	if hero != null:
+		hero.reset_visual()
 	state = "play"
 
 
 func start_run() -> void:
+	deaths = 0
 	_new_run()
 	if not music.playing and music_on:
 		music.play()
@@ -507,8 +546,7 @@ func _update(dt: float) -> void:
 		update_fx(dt)
 		shake = maxf(0.0, shake - dt * 2.0)
 		if dying_t <= 0.0:
-			state = "over"
-			sfx("over")
+			restart_level()   # no game-over screen: the level restarts by itself
 		return
 	if state == "over" or state == "win":
 		update_fx(dt)
@@ -544,6 +582,8 @@ func _update(dt: float) -> void:
 	update_spears(dt)
 	contact_damage()
 	update_hearts(dt)
+	update_sentries(dt)
+	check_lethal()
 	update_boxes(dt)
 	update_fx(dt)
 	check_progress()
@@ -564,7 +604,11 @@ func _sync_nodes() -> void:
 	if shake > 0.0:
 		var a: float = 10.0 * minf(1.0, shake)
 		off = Vector2(randf_range(-a, a), randf_range(-a, a))
-	camera.position = cam_pos + off
+	camera.offset = off
+	cam_pos = camera.get_screen_center_position() - Vector2(Cfg.SCREEN_W / 2.0, Cfg.SCREEN_H / 2.0)
+	if hero != null:
+		hero.visible = state != "over"
+		hero.update_visual(player.x, player.y, player.facing, Vector2(player.vx, player.vy).length(), player.is_dashing(), state == "dying")
 	player_light.position = Vector2(player.x, player.y)
 	for i in range(brazier_lights.size()):
 		var f: float = 0.82 + 0.18 * sin(clock * 9.0 + i * 1.7) * sin(clock * 5.3 + i)
@@ -596,14 +640,7 @@ func _sync_nodes() -> void:
 
 func update_camera(dt: float) -> void:
 	var p = player
-	var tx: float = p.x + p.vx * 0.12 - Cfg.SCREEN_W / 2.0
-	var ty: float = p.y + p.vy * 0.12 - Cfg.SCREEN_H / 2.0
-	var b: Rect2 = arena.bounds
-	tx = clampf(tx, b.position.x - Cfg.WALL, b.end.x + Cfg.WALL - Cfg.SCREEN_W)
-	ty = clampf(ty, b.position.y - Cfg.WALL, b.end.y + Cfg.WALL - Cfg.SCREEN_H)
-	var k: float = 1.0 - exp(-9.0 * dt)
-	cam_pos.x += (tx - cam_pos.x) * k
-	cam_pos.y += (ty - cam_pos.y) * k
+	camera.position = Vector2(p.x + p.vx * 0.12, p.y + p.vy * 0.12)
 
 
 # ======================================================================== combat
@@ -690,6 +727,10 @@ func dash_hits() -> void:
 			p.dash_hit[e.id] = true
 			damage_enemy(e, Cfg.DASH_DAMAGE * p.dmg_mult, p.dash_dx, p.dash_dy)
 			fx_ring(e.x, e.y, Color8(90, 240, 225), 60.0, 0.2, 3.0)
+	for sn in sentries:
+		if sn.alive and not p.dash_hit.has(sn.get_instance_id()) and Vector2(sn.global_position.x - p.x, sn.global_position.y - p.y).length() < sn.radius + 34.0:
+			p.dash_hit[sn.get_instance_id()] = true
+			damage_sentry(sn, Cfg.DASH_DAMAGE * p.dmg_mult, p.dash_dx, p.dash_dy)
 	purge_dead()
 
 
@@ -726,6 +767,17 @@ func update_shots(dt: float) -> void:
 							if s.pierce < 0:
 								dead = true
 							break
+		if not dead:
+			for sn in sentries:
+				if not sn.alive or s.hit.has(sn.get_instance_id()):
+					continue
+				if Vector2(sn.global_position.x - s.x, sn.global_position.y - s.y).length() < sn.radius + s.r:
+					s.hit[sn.get_instance_id()] = true
+					damage_sentry(sn, s.dmg, s.vx, s.vy)
+					s.pierce -= 1
+					if s.pierce < 0:
+						dead = true
+						break
 		if not dead:
 			keep.append(s)
 	shots = keep
@@ -773,6 +825,8 @@ func hurt_player(dx: float, dy: float) -> void:
 	red_flash = 0.3
 	fx_burst(p.x, p.y, Color8(255, 90, 110), 12, 300.0, 0.5, 8.0)
 	sfx("hurt")
+	if hero != null:
+		hero.play_hurt()
 	if p.hp <= 0:
 		state = "dying"
 		dying_t = 1.1
@@ -1278,11 +1332,11 @@ func spawn_center(ang_in: float = 999.0) -> Vector2:
 			return Vector2(x, y)
 		ang = 999.0
 	var far: Array = []
-	for pt in Cfg.SPAWN_POINTS:
+	for pt in spawn_pts:
 		if Vector2(pt.x - p.x, pt.y - p.y).length() > Cfg.MIN_SPAWN_DISTANCE:
 			far.append(pt)
 	if far.is_empty():
-		far = Cfg.SPAWN_POINTS
+		far = spawn_pts
 	return far[randi() % far.size()]
 
 
@@ -1369,9 +1423,64 @@ func update_director(dt: float) -> void:
 		spawn_enemy(kinds[i], clampf(cc.x + cos(ang) * rad, 30.0, Cfg.ARENA - 30.0), clampf(cc.y + sin(ang) * rad, 30.0, Cfg.ARENA - 30.0))
 
 
+# ======================================================================== lives, restart, sentries, camera limits
+func _apply_camera_limits() -> void:
+	var b: Rect2 = arena.bounds
+	camera.limit_left = int(b.position.x - Cfg.WALL)
+	camera.limit_top = int(b.position.y - Cfg.WALL)
+	camera.limit_right = int(b.end.x + Cfg.WALL)
+	camera.limit_bottom = int(b.end.y + Cfg.WALL)
+
+
+func restart_level() -> void:
+	deaths += 1
+	_new_run()
+	fade = 1.0
+	show_banner(str(Rooms.t(lang, "restart")))
+
+
+func kill_player() -> void:
+	if state != "play":
+		return
+	player.hp = 1
+	hurt_player(0.0, 0.0)
+
+
+func check_lethal() -> void:
+	if state != "play" or player.invuln > 0.0 or hero == null:
+		return
+	var hb = hero.get_node_or_null("Hurtbox")
+	if hb == null:
+		return
+	for a in hb.get_overlapping_areas():
+		if a.is_in_group("lethal"):
+			kill_player()
+			return
+
+
+func update_sentries(dt: float) -> void:
+	if room != 0:
+		return
+	for sn in sentries:
+		sn.step(dt, arena)
+
+
+func damage_sentry(sn, dmg: float, dx: float, dy: float) -> void:
+	sn.take_hit(dmg)
+	fx_burst(sn.global_position.x, sn.global_position.y, Color8(255, 190, 150), 5, 200.0, 0.25, 6.0)
+	sfx("hit", 0.04)
+	if not sn.alive:
+		kills += 1
+		sfx("kill", 0.04)
+		fx_diamonds(sn.global_position.x, sn.global_position.y, 12, 320.0, 0.7)
+		fx_ring(sn.global_position.x, sn.global_position.y, Color8(255, 190, 120), 110.0, 0.35, 3.0)
+		fx_text(sn.global_position.x, sn.global_position.y - 24.0, "+10", Color8(255, 232, 150), 26)
+		add_pride(10)
+
+
 # ======================================================================== mini-boss rooms
 func all_braziers() -> Array:
-	var out: Array = Cfg.BRAZIERS.duplicate()
+	var out: Array = brazier_positions.duplicate()
 	for d in Rooms.ROOMS:
 		out.append_array(d["braziers"])
 	return out
@@ -1383,6 +1492,9 @@ func _snap_camera() -> void:
 	var ty: float = player.y - Cfg.SCREEN_H / 2.0
 	cam_pos.x = clampf(tx, b.position.x - Cfg.WALL, b.end.x + Cfg.WALL - Cfg.SCREEN_W)
 	cam_pos.y = clampf(ty, b.position.y - Cfg.WALL, b.end.y + Cfg.WALL - Cfg.SCREEN_H)
+	_apply_camera_limits()
+	camera.position = Vector2(player.x, player.y)
+	camera.reset_smoothing()
 
 
 func check_doors() -> void:
@@ -1631,8 +1743,6 @@ func _draw() -> void:
 	var drawables: Array = [[fpos.y, "ferry", null]]
 	for e in enemies:
 		drawables.append([e.y, "enemy", e])
-	if state != "over" and state != "dying":
-		drawables.append([player.y, "player", player])
 	drawables.sort_custom(func(a, b): return a[0] < b[0])
 	for d in drawables:
 		if d[1] == "ferry":
@@ -1792,6 +1902,11 @@ func _draw_fx_add(node: CanvasItem) -> void:
 		if e.kind == "elite" and e.windup > 0.0:
 			var k: float = 1.0 - e.windup / Cfg.ELITE_WINDUP
 			draw_glow(node, Vector2(e.x, e.y), 40.0 + 90.0 * k, Color(0.78, 0.59, 0.16, 1.0))
+	# lethal zones: a pulsing red outline that stays visible in the dark
+	for hz in arena.hazard_rects:
+		var pulse: float = 0.5 + 0.5 * sin(clock * 4.0)
+		node.draw_rect(hz, Color(0.3, 0.0, 0.08, 0.22 + 0.12 * pulse))
+		node.draw_rect(hz, Color(0.9, 0.15, 0.25, 0.5 + 0.3 * pulse), false, 5.0)
 	# arc lightning
 	for b in bolts:
 		var k2: float = float(b["life"]) / float(b["max"])

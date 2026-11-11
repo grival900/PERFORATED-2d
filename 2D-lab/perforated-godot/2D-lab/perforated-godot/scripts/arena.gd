@@ -16,6 +16,8 @@ var last_normal: Vector2 = Vector2.ZERO   # direction of the last push by a soli
 var pillar_centers: Array = []   # main arena pillar positions (for the minimap)
 var low_wall_rects: Array = []   # main arena low walls (for the minimap)
 var altar_pos: Vector2 = Cfg.ALTAR_POS
+var braziers: Array = Cfg.BRAZIERS
+var hazard_rects: Array = []   # lethal zones (nodes in the group "hazard")
 
 
 func _init() -> void:
@@ -38,6 +40,12 @@ func _init() -> void:
 func load_from_nodes(root: Node) -> void:
 	## Take the main arena obstacles from the scene nodes (groups "pillar" and "low_wall"),
 	## so they can be moved in the editor. If the scene has none, the data in rooms.gd / cfg.gd is used.
+	hazard_rects = []
+	for hz in root.get_tree().get_nodes_in_group("hazard"):
+		var cs = hz.get_node_or_null("CollisionShape2D")
+		if cs != null and cs.shape is RectangleShape2D:
+			var sz: Vector2 = cs.shape.size
+			hazard_rects.append(Rect2(hz.global_position - sz / 2.0, sz))
 	var pils: Array = root.get_tree().get_nodes_in_group("pillar")
 	var walls: Array = root.get_tree().get_nodes_in_group("low_wall")
 	if pils.is_empty() and walls.is_empty():
@@ -163,7 +171,10 @@ func is_free(x: float, y: float, margin: float) -> bool:
 	for rc in main_solid:
 		if rc.grow(margin).has_point(Vector2(x, y)):
 			return false
-	for b in Cfg.BRAZIERS:
+	for hz in hazard_rects:
+		if hz.grow(margin + 30.0).has_point(Vector2(x, y)):
+			return false
+	for b in braziers:
 		if (b.x - x) * (b.x - x) + (b.y - y) * (b.y - y) < 120.0 * 120.0:
 			return false
 	var a: Vector2 = altar_pos

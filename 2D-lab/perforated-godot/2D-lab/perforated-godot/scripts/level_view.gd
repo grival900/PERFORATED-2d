@@ -80,8 +80,9 @@ func _draw() -> void:
 
 	# braziers. The pillars, low walls and altar are separate scene nodes (see main.tscn).
 	var br: Texture2D = tex["brazier"]
-	for c in Cfg.BRAZIERS:
-		draw_texture(br, c - br.get_size() * 0.5)
+	if get_tree() == null or get_tree().get_nodes_in_group("brazier").is_empty():   # (normally the Braziers nodes draw them)
+		for c in Cfg.BRAZIERS:
+			draw_texture(br, c - br.get_size() * 0.5)
 
 	for d in Rooms.ROOMS:
 		_draw_room(d)
